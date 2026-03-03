@@ -1,0 +1,105 @@
+---
+title: TEE attestation
+description: Trusted Execution Environments provide hardware-based isolation with cryptographic attestation
+---
+
+## What are TEEs
+
+Trusted Execution Environments (TEEs) are hardware-isolated computing environments that protect code and data from access by the host operating system, hypervisor, and other software on the same machine. TEEs provide:
+
+- **Memory isolation** - Encrypted memory that cannot be read by privileged software
+- **Code integrity** - Cryptographic measurement of executed code
+- **Attestation** - Cryptographic proof of the execution environment
+
+<Info>
+  TEEs are designed to protect against both software attacks and physical access to the server hardware.
+</Info>
+
+## Intel TDX
+
+Intel Trust Domain Extensions (TDX) is a TEE technology that creates isolated virtual machines called Trust Domains (TDs). Each TD runs with:
+
+- **Memory encryption** - All TD memory is encrypted with a TD-specific key
+- **CPU-attested measurements** - Hardware-rooted measurements of the TD's code and configuration
+- **Remote attestation** - Cryptographic quotes that prove the TD's state to remote verifiers
+
+### TDX quotes
+
+A TDX quote is a signed attestation report that contains:
+
+- **Report data** - 64 bytes of user-provided data (used for session binding and certificate binding)
+- **Measurement registers** - MRTD and RTMR values that represent the TD's boot chain and runtime state
+- **TCB status** - Security posture of the platform (UpToDate, OutOfDate, etc.)
+- **Signature** - Cryptographic signature from Intel's Quoting Enclave
+
+Quotes are generated on-demand by the TEE and verified using Intel's DCAP (Data Center Attestation Primitives) infrastructure.
+
+## Attestation flow
+
+The attestation flow in Atlas follows this sequence:
+
+### 1. TLS handshake
+
+Standard TLS 1.3 connection is established. The server's certificate is captured but not fully trusted yet.
+
+### 2. Quote request
+
+After TLS handshake, the client:
+
+1. Extracts the session-specific EKM (Exported Keying Material)
+2. Generates a random nonce
+3. Computes `report_data = SHA512(nonce || session_ekm)`
+4. Sends the nonce to the server
+
+### 3. Quote generation
+
+The server:
+
+1. Extracts its own session EKM (matches the client's EKM)
+2. Computes the same `report_data = SHA512(nonce || server_ekm)`
+3. Requests a TDX quote from the hardware with this report data
+4. Returns the quote and event log to the client
+
+### 4. Quote verification
+
+The client performs cryptographic verification:
+
+1. **Signature verification** - Validate the quote's signature using Intel PCCS collateral
+2. **Report data verification** - Confirm the quote's report data matches the expected value
+3. **TCB status check** - Ensure the platform's security level meets policy requirements
+4. **Measurement verification** - Verify MRTD and RTMR values against expected bootchain
+
+<Note>
+  Quote verification uses Intel's PCCS (Provisioning Certification Caching Service) to fetch current collateral including certificates and revocation lists.
+</Note>
+
+### 5. Event log replay
+
+The client replays the event log to:
+
+1. Recompute RTMR3 by hashing each event in sequence
+2. Verify the final RTMR3 matches the value in the quote
+3. Locate the certificate binding event that proves the TEE owns the TLS private key
+
+### 6. Verification complete
+
+If all checks pass, the client has cryptographic proof that:
+
+- The server is running in a genuine Intel TDX environment
+- The bootchain and runtime measurements match expected values
+- The attestation is bound to this specific TLS session
+- The TEE owns the TLS private key
+
+The client can now safely send sensitive data over the TLS connection.
+
+## Verification libraries
+
+Atlas uses Intel's DCAP libraries for quote verification:
+
+- **Quote verification** - Signature validation and TCB status checks
+- **Collateral fetching** - Retrieval of certificates and revocation information from PCCS
+- **Platform validation** - Verification that the TEE platform meets security requirements
+
+<Info>
+  You can configure a custom PCCS URL via the `pccs_url` policy field. Atlas defaults to using Phala's public PCCS endpoint.
+</Info>

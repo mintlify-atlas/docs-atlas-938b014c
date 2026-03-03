@@ -1,0 +1,242 @@
+---
+title: Verifier traits
+description: Low-level aTLS verifier interface and implementation guide
+---
+
+## AtlsVerifier trait
+
+The `AtlsVerifier` trait defines the interface for verifying attestation over TLS. Implementors provide TEE-specific verification logic, such as TDX quote verification, bootchain validation, and certificate binding.
+
+### Trait definition
+
+```rust
+pub trait AtlsVerifier: Send + Sync {
+    fn verify<S>(
+        &self,
+        stream: &mut S,
+        peer_cert: &[u8],
+        session_ekm: &[u8],
+        hostname: &str,
+    ) -> impl Future<Output = Result<Report, AtlsVerificationError>> + Send
+    where
+        S: AsyncByteStream;
+}
+```
+
+### Parameters
+
+<ParamField path="stream" type="&mut S" required>
+  The TLS stream for communication with the TEE. Must implement `AsyncByteStream`.
+</ParamField>
+
+<ParamField path="peer_cert" type="&[u8]" required>
+  The server's leaf certificate in DER format, captured during TLS handshake.
+</ParamField>
+
+<ParamField path="session_ekm" type="&[u8]" required>
+  TLS session Exported Keying Material (EKM) for session binding per RFC 9266.
+</ParamField>
+
+<ParamField path="hostname" type="&str" required>
+  The server hostname for verification.
+</ParamField>
+
+### Return type
+
+<ResponseField name="Result" type="Report">
+  Returns a unified `Report` enum wrapping TEE-specific reports:
+  
+  ```rust
+  pub enum Report {
+      Tdx(VerifiedReport),
+  }
+  ```
+</ResponseField>
+
+## Report type
+
+The `Report` enum provides a unified interface for accessing TEE-specific attestation reports.
+
+### Methods
+
+```rust
+impl Report {
+    /// Try to get the underlying TDX report.
+    pub fn as_tdx(&self) -> Option<&VerifiedReport>
+    
+    /// Consume self and try to get the underlying TDX report.
+    pub fn into_tdx(self) -> Option<VerifiedReport>
+}
+```
+
+### Usage example
+
+```rust
+use atlas_rs::Report;
+
+fn handle_report(report: Report) {
+    match report {
+        Report::Tdx(tdx_report) => {
+            println!("TCB Status: {}", tdx_report.status);
+            println!("TDX Report: {:?}", tdx_report);
+        }
+    }
+}
+```
+
+## IntoVerifier trait
+
+The `IntoVerifier` trait converts policy configurations into concrete verifier instances.
+
+### Trait definition
+
+```rust
+pub trait IntoVerifier {
+    type Verifier: AtlsVerifier;
+    
+    fn into_verifier(self) -> Result<Self::Verifier, AtlsVerificationError>;
+}
+```
+
+### Usage example
+
+```rust
+use atlas_rs::{DstackTdxPolicy, IntoVerifier};
+
+let policy = DstackTdxPolicy::dev();
+let verifier = policy.into_verifier().unwrap();
+```
+
+## Verifier enum
+
+The `Verifier` enum wraps all concrete verifier implementations, enabling `Policy::into_verifier()` to return a single type while supporting multiple TEE verifiers.
+
+```rust
+pub enum Verifier {
+    DstackTdx(DstackTDXVerifier),
+}
+```
+
+### Usage example
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy, AtlsVerifier};
+
+let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+let verifier = policy.into_verifier().unwrap();
+
+// The verifier can be used with any async stream
+// let report = verifier.verify(&mut stream, &peer_cert, &session_ekm, hostname).await?;
+```
+
+## Low-level usage example
+
+For custom TLS handling, use the `AtlsVerifier` trait directly:
+
+```rust
+use atlas_rs::{DstackTDXVerifier, AtlsVerifier};
+use atlas_rs::tdx::ExpectedBootchain;
+use serde_json::json;
+
+async fn custom_verification() -> Result<(), Box<dyn std::error::Error>> {
+    let verifier = DstackTDXVerifier::builder()
+        .app_compose(json!({
+            "runner": "docker-compose",
+            "docker_compose_file": "..."
+        }))
+        .expected_bootchain(ExpectedBootchain {
+            mrtd: "abc123...".to_string(),
+            rtmr0: "def456...".to_string(),
+            rtmr1: "ghi789...".to_string(),
+            rtmr2: "jkl012...".to_string(),
+        })
+        .os_image_hash("86b181...")
+        .build()
+        .unwrap();
+
+    // Perform custom TLS handshake
+    let mut tls_stream = /* ... */;
+    let peer_cert = /* ... */;
+    let session_ekm = /* ... */;
+    
+    // Verify attestation
+    let report = verifier.verify(&mut tls_stream, &peer_cert, &session_ekm, "hostname").await?;
+    
+    match &report {
+        atlas_rs::Report::Tdx(tdx_report) => {
+            println!("TCB Status: {}", tdx_report.status);
+        }
+    }
+    
+    Ok(())
+}
+```
+
+## Platform differences
+
+The trait has different implementations for native and WASM platforms:
+
+### Native (tokio)
+
+```rust
+pub trait AtlsVerifier: Send + Sync {
+    fn verify<S>(
+        &self,
+        stream: &mut S,
+        peer_cert: &[u8],
+        session_ekm: &[u8],
+        hostname: &str,
+    ) -> impl Future<Output = Result<Report, AtlsVerificationError>> + Send
+    where
+        S: AsyncByteStream;
+}
+```
+
+### WASM
+
+```rust
+pub trait AtlsVerifier: Sync {
+    fn verify<S>(
+        &self,
+        stream: &mut S,
+        peer_cert: &[u8],
+        session_ekm: &[u8],
+        hostname: &str,
+    ) -> impl Future<Output = Result<Report, AtlsVerificationError>>
+    where
+        S: AsyncByteStream;
+}
+```
+
+Note that WASM version removes `Send` bounds since WASM is single-threaded.
+
+## Implementation guide
+
+To implement a custom verifier:
+
+1. **Implement `AtlsVerifier`**: Provide TEE-specific verification logic
+2. **Implement `IntoVerifier`**: Create verifier from policy configuration
+3. **Add to `Verifier` enum**: Enable use with high-level `Policy` API
+4. **Add to `Policy` enum**: Expose new verifier to users
+
+See `core/ARCHITECTURE.md` in the repository for detailed architecture documentation.
+
+## AsyncByteStream trait
+
+Helper trait alias for async byte streams:
+
+```rust
+// Native
+pub trait AsyncByteStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+// WASM
+pub trait AsyncByteStream: AsyncRead + AsyncWrite + Unpin {}
+```
+
+Auto-implemented for any type satisfying the bounds.
+
+## See also
+
+- [atls_connect](/api/rust/atls-connect) - High-level connection API
+- [Policy types](/api/rust/policy-types) - Policy configuration
+- [Error handling](/api/rust/error-handling) - Error types

@@ -1,0 +1,241 @@
+---
+title: AtlsHttp
+description: HTTP/1.1 client over attested TLS using hyper for security and streaming support
+---
+
+## Overview
+
+The `AtlsHttp` class provides a lower-level HTTP/1.1 client over attested TLS connections. It uses hyper's battle-tested HTTP implementation to prevent CRLF injection attacks and correctly handle transfer encodings.
+
+This class supports connection reuse via HTTP/1.1 keep-alive, allowing multiple requests on the same attested connection.
+
+## Class methods
+
+### connect
+
+Establish an attested TLS connection and perform the HTTP/1.1 handshake.
+
+```typescript
+static async connect(
+  wsUrl: string,
+  serverName: string,
+  policy: Policy
+): Promise<AtlsHttp>
+```
+
+<ParamField path="wsUrl" type="string" required>
+  WebSocket proxy URL with optional target query parameter.
+
+  Examples:
+  - `"ws://127.0.0.1:9000?target=vllm.example.com:443"`
+  - `"ws://proxy.example.com:9000"`
+</ParamField>
+
+<ParamField path="serverName" type="string" required>
+  TLS server name for SNI and certificate validation.
+
+  Example: `"vllm.example.com"`
+</ParamField>
+
+<ParamField path="policy" type="Policy" required>
+  Attestation verification policy object.
+
+  See [Policy configuration](/core-concepts/policy) for details.
+</ParamField>
+
+<ResponseField name="return" type="AtlsHttp">
+  An `AtlsHttp` instance ready for making HTTP requests.
+</ResponseField>
+
+### attestation
+
+Get the attestation verification result from the connection handshake.
+
+```typescript
+attestation(): AttestationSummary
+```
+
+<ResponseField name="return" type="AttestationSummary">
+  Attestation summary object containing:
+
+  <ResponseField name="trusted" type="boolean">
+    Whether the attestation was successfully verified
+  </ResponseField>
+
+  <ResponseField name="teeType" type="string">
+    The TEE type (e.g., "Tdx")
+  </ResponseField>
+
+  <ResponseField name="tcbStatus" type="string">
+    TCB status from Intel (e.g., "UpToDate", "SWHardeningNeeded")
+  </ResponseField>
+
+  <ResponseField name="advisoryIds" type="string[]">
+    List of security advisory IDs
+  </ResponseField>
+</ResponseField>
+
+### fetch
+
+Perform an HTTP request and return a response with streaming body.
+
+```typescript
+async fetch(
+  method: string,
+  path: string,
+  host: string,
+  headers: Array<[string, string]>,
+  body?: Uint8Array
+): Promise<HttpResponse>
+```
+
+<ParamField path="method" type="string" required>
+  HTTP method (e.g., "GET", "POST", "PUT")
+</ParamField>
+
+<ParamField path="path" type="string" required>
+  Request path (e.g., "/v1/chat/completions")
+</ParamField>
+
+<ParamField path="host" type="string" required>
+  Host header value (typically the target hostname)
+</ParamField>
+
+<ParamField path="headers" type="Array<[string, string]>" required>
+  Array of header name-value pairs.
+
+  Example: `[["Content-Type", "application/json"]]`
+</ParamField>
+
+<ParamField path="body" type="Uint8Array" default="undefined">
+  Optional request body as bytes
+</ParamField>
+
+<ResponseField name="return" type="HttpResponse">
+  Response object containing:
+
+  <ResponseField name="status" type="number">
+    HTTP status code
+  </ResponseField>
+
+  <ResponseField name="statusText" type="string">
+    HTTP status text
+  </ResponseField>
+
+  <ResponseField name="headers" type="object">
+    Response headers as key-value pairs
+  </ResponseField>
+
+  <ResponseField name="body" type="ReadableStream">
+    Response body as a native ReadableStream. Hyper automatically handles chunked transfer decoding.
+  </ResponseField>
+</ResponseField>
+
+### isReady
+
+Check if the connection is ready for another request.
+
+```typescript
+isReady(): boolean
+```
+
+<ResponseField name="return" type="boolean">
+  `true` if the connection can accept a new request, `false` if closed or busy with an existing request
+</ResponseField>
+
+### close
+
+Explicitly close the HTTP connection.
+
+```typescript
+close(): void
+```
+
+## Connection reuse
+
+The `AtlsHttp` class supports HTTP/1.1 keep-alive, allowing multiple requests on the same attested connection:
+
+1. Connection becomes ready for reuse after the response body is fully consumed
+2. Use `isReady()` to check if the connection can accept a new request
+3. If a request is made while the connection is busy, an error will be thrown
+
+## Examples
+
+### Basic request
+
+```javascript
+import init, { AtlsHttp } from "@concrete-security/atlas-wasm";
+
+await init();
+
+const http = await AtlsHttp.connect(
+  "ws://127.0.0.1:9000?target=vllm.example.com:443",
+  "vllm.example.com",
+  { type: "dstack_tdx" }
+);
+
+console.log(http.attestation()); // { trusted: true, teeType: "Tdx", ... }
+
+const result = await http.fetch(
+  "POST",
+  "/v1/chat/completions",
+  "vllm.example.com",
+  [["Content-Type", "application/json"]],
+  new TextEncoder().encode('{"model":"gpt"}')
+);
+
+console.log(result.status);
+```
+
+### Streaming response
+
+```javascript
+const result = await http.fetch(
+  "POST",
+  "/v1/chat/completions",
+  "vllm.example.com",
+  [["Content-Type", "application/json"]],
+  new TextEncoder().encode('{"model":"gpt","stream":true}')
+);
+
+// result.body is a ReadableStream with automatic chunked decoding
+const reader = result.body.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  console.log(new TextDecoder().decode(value));
+}
+```
+
+### Connection reuse
+
+```javascript
+const http = await AtlsHttp.connect(
+  "ws://127.0.0.1:9000?target=api.example.com:443",
+  "api.example.com",
+  { type: "dstack_tdx" }
+);
+
+// First request
+const result1 = await http.fetch("GET", "/users", "api.example.com", [], null);
+await result1.body.getReader().read(); // consume response
+
+// Wait for connection to be ready
+while (!http.isReady()) {
+  await new Promise(resolve => setTimeout(resolve, 10));
+}
+
+// Second request on same connection
+const result2 = await http.fetch("GET", "/posts", "api.example.com", [], null);
+
+// Clean up
+http.close();
+```
+
+## Security features
+
+The `AtlsHttp` class uses hyper's HTTP/1.1 implementation which provides:
+
+- **CRLF injection prevention**: Headers are validated to prevent injection attacks
+- **Transfer encoding support**: Correctly handles chunked, content-length, and close-delimited encodings
+- **Battle-tested implementation**: Uses the widely-deployed hyper HTTP library

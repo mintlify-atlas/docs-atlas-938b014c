@@ -1,0 +1,230 @@
+---
+title: createAtlsAgent
+description: Create an https.Agent for aTLS connections
+---
+
+Create an `https.Agent` that establishes aTLS-verified connections. Use this with `https.request`, axios, or other HTTP clients that accept an Agent.
+
+## Function signature
+
+```typescript
+function createAtlsAgent(options: AtlsAgentOptions): Agent
+```
+
+## Parameters
+
+<ParamField path="options" type="AtlsAgentOptions" required>
+  Configuration object for the aTLS agent
+  
+  <Expandable title="properties">
+    <ParamField path="target" type="string" required>
+      Target host with optional port (e.g., `"enclave.example.com"` or `"enclave.example.com:8443"`)
+    </ParamField>
+    
+    <ParamField path="policy" type="Policy" required>
+      Verification policy for attestation. See [Policy Configuration](/policy/overview) for details.
+    </ParamField>
+    
+    <ParamField path="serverName" type="string">
+      SNI (Server Name Indication) override. Defaults to the host portion of `target`.
+    </ParamField>
+    
+    <ParamField path="onAttestation" type="(attestation: AtlsAttestation, socket: Socket) => void">
+      Callback invoked after successful attestation verification. Receives the attestation object and the underlying socket.
+    </ParamField>
+    
+    <ParamField path="...agentOptions" type="AgentOptions">
+      Additional options passed to the underlying `https.Agent`. Common options include `keepAlive`, `keepAliveMsecs`, `maxSockets`, `maxFreeSockets`, and `timeout`.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Return value
+
+<ResponseField name="Agent" type="https.Agent">
+  An `https.Agent` instance that creates aTLS connections. The agent automatically manages connection pooling and keep-alive.
+</ResponseField>
+
+## Usage examples
+
+### With https.request
+
+```typescript
+import { createAtlsAgent } from "@concrete-security/atlas-node"
+import https from "https"
+
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"]
+  },
+  onAttestation: (att) => console.log("Verified:", att.teeType)
+})
+
+https.get("https://enclave.example.com/api/data", { agent }, (res) => {
+  // Access attestation data on the socket
+  console.log(res.socket.atlsAttestation)
+  
+  let data = ""
+  res.on("data", (chunk) => data += chunk)
+  res.on("end", () => console.log(data))
+})
+```
+
+### With axios
+
+```typescript
+import { createAtlsAgent } from "@concrete-security/atlas-node"
+import axios from "axios"
+
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (att) => {
+    if (!att.trusted) {
+      throw new Error("Attestation failed")
+    }
+  }
+})
+
+const client = axios.create({
+  httpsAgent: agent,
+  baseURL: "https://enclave.example.com"
+})
+
+const response = await client.get("/api/data")
+console.log(response.data)
+```
+
+### With custom agent options
+
+```typescript
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  maxFreeSockets: 10,
+  timeout: 60000
+})
+```
+
+### Production usage with full verification
+
+```typescript
+import { createAtlsAgent, mergeWithDefaultAppCompose } from "@concrete-security/atlas-node"
+
+const agent = createAtlsAgent({
+  target: "enclave.example.com:8443",
+  policy: {
+    type: "dstack_tdx",
+    expected_bootchain: {
+      mrtd: "b24d3b24...",
+      rtmr0: "24c15e08...",
+      rtmr1: "6e1afb74...",
+      rtmr2: "89e73ced..."
+    },
+    os_image_hash: "86b18137...",
+    app_compose: mergeWithDefaultAppCompose({
+      docker_compose_file: "services:\n  app:\n    image: myapp",
+      allowed_envs: ["API_KEY"]
+    }),
+    allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"]
+  },
+  onAttestation: (attestation, socket) => {
+    console.log("TEE Type:", attestation.teeType)
+    console.log("TCB Status:", attestation.tcbStatus)
+    console.log("Measurement:", attestation.measurement)
+  }
+})
+```
+
+## Accessing attestation data
+
+Attestation data is available on the socket:
+
+```typescript
+const agent = createAtlsAgent({ target, policy })
+
+https.get("https://enclave.example.com/api/data", { agent }, (res) => {
+  const attestation = res.socket.atlsAttestation
+  
+  console.log(attestation.trusted)      // true
+  console.log(attestation.teeType)      // "tdx"
+  console.log(attestation.measurement)  // "b24d3b24..."
+  console.log(attestation.tcbStatus)    // "UpToDate"
+  console.log(attestation.advisoryIds)  // []
+})
+```
+
+## Connection pooling
+
+The agent automatically manages connection pooling with keep-alive enabled by default:
+
+```typescript
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  keepAlive: true,        // Default: true
+  keepAliveMsecs: 30000,  // Default: 1000
+  maxSockets: 50,         // Default: Infinity
+  maxFreeSockets: 10      // Default: 256
+})
+
+// Make multiple requests - connections are reused
+for (let i = 0; i < 100; i++) {
+  https.get("https://enclave.example.com/api/data", { agent }, handler)
+}
+```
+
+## Error handling
+
+```typescript
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (attestation, socket) => {
+    if (!attestation.trusted) {
+      throw new Error(`Attestation failed: ${attestation.teeType}`)
+    }
+  }
+})
+
+https.get("https://enclave.example.com/api/data", { agent }, (res) => {
+  // Handle response
+}).on("error", (err) => {
+  if (err.message.includes("Attestation failed")) {
+    console.error("TEE verification failed")
+  } else if (err.message.includes("BootchainMismatch")) {
+    console.error("Bootchain mismatch")
+  } else {
+    console.error("Request failed:", err.message)
+  }
+})
+```
+
+## Graceful shutdown
+
+For long-running processes, close all sockets before exit:
+
+```typescript
+import { closeAllSockets } from "@concrete-security/atlas-node/binding"
+
+const agent = createAtlsAgent({ target, policy })
+
+// ... use agent ...
+
+// Before process exit
+process.on("SIGTERM", async () => {
+  await closeAllSockets()
+  process.exit(0)
+})
+```
+
+## Related
+
+- [createAtlsFetch](/api/nodejs/create-atls-fetch) - Fetch-compatible API for aTLS connections
+- [Attestation object](/api/nodejs/attestation-object) - Structure of the attestation data
+- [Policy configuration](/policy/overview) - Configure verification requirements

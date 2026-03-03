@@ -1,80 +1,368 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get started with Atlas in 5 minutes
 ---
 
-## Get started in three steps
+This guide will help you make your first attested TLS connection using Atlas. Choose your platform below to get started.
 
-Get your documentation site running locally and make your first customization.
+<Tabs>
+  <Tab title="Node.js">
+    ## Prerequisites
 
-### Step 1: Set up your local environment
+    - Node.js 18 or higher
+    - npm or pnpm
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+    ## Installation
 
-### Step 2: Deploy your changes
+    ```bash
+    npm install @concrete-security/atlas-node
+    ```
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ## Basic example
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    Create a simple attested fetch:
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+    ```typescript
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
 
-### Step 3: Go live
+    const fetch = createAtlsFetch({
+      target: "enclave.example.com",
+      policy: {
+        type: "dstack_tdx",
+        allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"],
+        disable_runtime_verification: true  // Development only
+      },
+      onAttestation: (att) => {
+        console.log("TEE Type:", att.teeType)
+        console.log("TCB Status:", att.tcbStatus)
+        console.log("Trusted:", att.trusted)
+      }
+    })
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    const response = await fetch("/api/data")
+    console.log("Status:", response.status)
+    console.log("Attestation:", response.attestation)
+    ```
+
+    ## AI SDK integration
+
+    Connect to an LLM running in a TEE:
+
+    ```typescript
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
+    import { createOpenAI } from "@ai-sdk/openai"
+    import { streamText } from "ai"
+
+    const fetch = createAtlsFetch({
+      target: "llm.example.com",
+      policy: {
+        type: "dstack_tdx",
+        allowed_tcb_status: ["UpToDate"]
+      },
+      onAttestation: (att) => console.log(`TEE verified: ${att.teeType}`)
+    })
+
+    const openai = createOpenAI({
+      baseURL: "https://llm.example.com/v1",
+      apiKey: process.env.OPENAI_API_KEY,
+      fetch
+    })
+
+    const { textStream } = await streamText({
+      model: openai.chat("your-model"),
+      messages: [{ role: "user", content: "Hello from a verified TEE!" }]
+    })
+
+    for await (const chunk of textStream) {
+      process.stdout.write(chunk)
+    }
+    ```
+
+    <Note>
+    Use `openai.chat(model)` for OpenAI-compatible servers like vLLM. The default `openai(model)` uses the Responses API which most servers don't support yet.
+    </Note>
+
+    ## Next steps
+
+    - Read the complete [Node.js platform guide](/platforms/nodejs)
+    - Learn about [policy configuration](/policy/overview)
+    - Explore [AI SDK integration examples](/examples/ai-sdk-integration)
+  </Tab>
+
+  <Tab title="Browser/WASM">
+    ## Prerequisites
+
+    - Modern browser with WebAssembly support
+    - WebSocket-to-TCP proxy (required for browser connections)
+
+    ## Installation
+
+    ```bash
+    npm install @concrete-security/atlas-wasm
+    ```
+
+    ## Setup proxy
+
+    Browser applications require a WebSocket-to-TCP proxy:
+
+    ```bash
+    # Install proxy
+    cargo install atlas-proxy
+
+    # Configure allowlist (required for security)
+    export ATLS_PROXY_ALLOWLIST="llm.example.com:443"
+    export ATLS_PROXY_LISTEN="127.0.0.1:9000"
+
+    # Start proxy
+    atlas-proxy
+    ```
+
+    ## Basic example
+
+    ```javascript
+    import { init, createAtlsFetch } from "@concrete-security/atlas-wasm"
+
+    // Initialize WASM module
+    await init()
+
+    const fetch = createAtlsFetch({
+      proxyUrl: "ws://127.0.0.1:9000",
+      targetHost: "llm.example.com",
+      policy: {
+        type: "dstack_tdx",
+        allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"]
+      },
+      onAttestation: (att) => {
+        console.log("TEE Type:", att.teeType)
+        console.log("TCB Status:", att.tcbStatus)
+        console.log("Trusted:", att.trusted)
+      }
+    })
+
+    const response = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt",
+        messages: [{ role: "user", content: "Hello!" }]
+      })
+    })
+
+    console.log("Status:", response.status)
+    console.log("Attestation:", response.attestation)
+    ```
+
+    ## Streaming responses
+
+    Handle streaming LLM responses:
+
+    ```javascript
+    const response = await fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt",
+        messages: [{ role: "user", content: "Hello!" }],
+        stream: true
+      })
+    })
+
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      
+      const chunk = decoder.decode(value)
+      console.log(chunk)
+    }
+    ```
+
+    ## Next steps
+
+    - Read the complete [Browser/WASM platform guide](/platforms/browser-wasm)
+    - Learn about [proxy setup and configuration](/deployment/proxy-setup)
+    - Explore [fetch API examples](/examples/fetch-api)
+  </Tab>
+
+  <Tab title="Rust">
+    ## Prerequisites
+
+    - Rust 1.75 or higher
+    - Cargo
+
+    ## Installation
+
+    Add to your `Cargo.toml`:
+
+    ```toml
+    [dependencies]
+    atlas-rs = "0.2"
+    tokio = { version = "1", features = ["rt", "macros", "net"] }
+    ```
+
+    Or use `cargo add`:
+
+    ```bash
+    cargo add atlas-rs
+    cargo add tokio --features rt,macros,net
+    ```
+
+    ## Basic example
+
+    Development mode with relaxed verification:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let tcp = tokio::net::TcpStream::connect("tee-server.example.com:443").await?;
+
+        // Development policy - relaxed TCB status, no bootchain verification
+        let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+        let (mut tls_stream, report) = atls_connect(
+            tcp,
+            "tee-server.example.com",
+            policy,
+            None
+        ).await?;
+
+        // Access attestation report
+        match &report {
+            atlas_rs::Report::Tdx(tdx_report) => {
+                println!("TEE verified! TCB Status: {}", tdx_report.status);
+            }
+        }
+
+        // Use tls_stream for subsequent requests...
+        Ok(())
+    }
+    ```
+
+    ## Full verification (production)
+
+    With bootchain measurements and app configuration:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, ExpectedBootchain};
+    use serde_json::json;
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let tcp = tokio::net::TcpStream::connect("vllm.example.com:443").await?;
+
+        // Full verification policy
+        let policy = Policy::DstackTdx(DstackTdxPolicy {
+            expected_bootchain: Some(ExpectedBootchain {
+                mrtd: "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217".into(),
+                rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418".into(),
+                rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7".into(),
+                rtmr2: "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57".into(),
+            }),
+            os_image_hash: Some("86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a".into()),
+            app_compose: Some(json!({
+                "runner": "docker-compose",
+                "docker_compose_file": "version: '3'\nservices:\n  vllm:\n    image: vllm/vllm-openai:latest\n    ..."
+            })),
+            allowed_tcb_status: vec!["UpToDate".into()],
+            ..Default::default()
+        });
+
+        let (mut tls_stream, report) = atls_connect(
+            tcp,
+            "vllm.example.com",
+            policy,
+            None
+        ).await?;
+
+        println!("TEE fully verified!");
+
+        // Use tls_stream for API requests...
+        Ok(())
+    }
+    ```
+
+    ## JSON policy configuration
+
+    Load policies from JSON files:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy};
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        // Load policy from JSON
+        let policy_json = r#"{
+            "type": "dstack_tdx",
+            "allowed_tcb_status": ["UpToDate", "OutOfDate"],
+            "grace_period": 2592000,
+            "expected_bootchain": {
+                "mrtd": "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+                "rtmr0": "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418",
+                "rtmr1": "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7",
+                "rtmr2": "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57"
+            },
+            "os_image_hash": "86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a",
+            "app_compose": {
+                "runner": "docker-compose",
+                "docker_compose_file": "..."
+            }
+        }"#;
+
+        let policy: Policy = serde_json::from_str(policy_json)?;
+
+        let tcp = tokio::net::TcpStream::connect("tee-server.example.com:443").await?;
+        let (tls_stream, report) = atls_connect(
+            tcp,
+            "tee-server.example.com",
+            policy,
+            None
+        ).await?;
+
+        Ok(())
+    }
+    ```
+
+    ## Next steps
+
+    - Read the complete [Rust platform guide](/platforms/rust)
+    - Learn about [policy configuration](/policy/overview)
+    - Explore [computing bootchain measurements](/policy/computing-measurements)
+    - Check the [Rust API reference](/api/rust/atls-connect)
+  </Tab>
+</Tabs>
+
+## Understanding the examples
+
+All examples above use `disable_runtime_verification: true` or `DstackTdxPolicy::dev()` for development. This skips bootchain and application verification but still validates:
+
+- The server is running in a genuine TEE
+- The TCB status meets requirements
+- The attestation is cryptographically valid
+
+<Warning>
+**Production deployments** must provide full verification with `expected_bootchain`, `os_image_hash`, and `app_compose`. See [Policy configuration](/policy/overview) for details.
+</Warning>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Platform guides" icon="book" href="/platforms/nodejs">
+    Complete guides for each platform
+  </Card>
+  
+  <Card title="Policy configuration" icon="shield-check" href="/policy/overview">
+    Configure attestation policies for production
+  </Card>
+  
+  <Card title="Examples" icon="code" href="/examples/ai-sdk-integration">
+    More examples and integration patterns
+  </Card>
+  
+  <Card title="API reference" icon="brackets-curly" href="/api/nodejs/create-atls-fetch">
+    Complete API documentation
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

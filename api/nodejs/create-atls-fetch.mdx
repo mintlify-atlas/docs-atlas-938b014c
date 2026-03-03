@@ -1,0 +1,197 @@
+---
+title: createAtlsFetch
+description: Create a fetch-compatible function with aTLS verification
+---
+
+Create a fetch-compatible function that establishes aTLS-verified connections to TEE endpoints.
+
+## Function signature
+
+```typescript
+function createAtlsFetch(options: AtlsFetchOptions): AtlsFetch
+function createAtlsFetch(target: string): AtlsFetch  // Throws error - use options object
+```
+
+<Note>
+The string shorthand is no longer supported. You must pass an options object with `target` and `policy`.
+</Note>
+
+## Parameters
+
+<ParamField path="options" type="AtlsFetchOptions" required>
+  Configuration object for the aTLS fetch function
+  
+  <Expandable title="properties">
+    <ParamField path="target" type="string" required>
+      Target host with optional port (e.g., `"enclave.example.com"` or `"enclave.example.com:8443"`)
+    </ParamField>
+    
+    <ParamField path="policy" type="Policy" required>
+      Verification policy for attestation. See [Policy Configuration](/policy/overview) for details.
+    </ParamField>
+    
+    <ParamField path="serverName" type="string">
+      SNI (Server Name Indication) override. Defaults to the host portion of `target`.
+    </ParamField>
+    
+    <ParamField path="headers" type="Record<string, string>">
+      Default headers to include in all requests
+    </ParamField>
+    
+    <ParamField path="onAttestation" type="(attestation: AtlsAttestation) => void">
+      Callback invoked after successful attestation verification. Use for logging, policy enforcement, or throwing errors for failed attestations.
+    </ParamField>
+  </Expandable>
+</ParamField>
+
+## Return value
+
+<ResponseField name="AtlsFetch" type="function">
+  A fetch-compatible function with the signature:
+  ```typescript
+  (input: RequestInfo, init?: RequestInit) => Promise<AtlsResponse>
+  ```
+  
+  The returned `AtlsResponse` extends the standard `Response` with an additional `attestation` property.
+</ResponseField>
+
+## Usage examples
+
+### Basic usage
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"]
+  }
+})
+
+const response = await fetch("/api/secure-data")
+console.log(response.attestation.trusted)  // true
+console.log(response.attestation.teeType)  // "tdx"
+```
+
+### With attestation callback
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (attestation) => {
+    if (!attestation.trusted) {
+      throw new Error("Attestation verification failed!")
+    }
+    console.log("TEE Type:", attestation.teeType)
+    console.log("TCB Status:", attestation.tcbStatus)
+    console.log("Measurement:", attestation.measurement)
+  }
+})
+
+const response = await fetch("/api/data")
+```
+
+### With AI SDK integration
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+import { createOpenAI } from "@ai-sdk/openai"
+import { streamText } from "ai"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (att) => console.log(`TEE verified: ${att.teeType}`)
+})
+
+const openai = createOpenAI({
+  baseURL: "https://enclave.example.com/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+  fetch
+})
+
+// Use .chat() for OpenAI-compatible servers (vLLM, etc.)
+const { textStream } = await streamText({
+  model: openai.chat("your-model"),
+  messages: [{ role: "user", content: "Hello from a verified TEE!" }]
+})
+
+for await (const chunk of textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+### With custom port
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com:8443",
+  policy: productionPolicy
+})
+
+const response = await fetch("/api/data")
+```
+
+### With default headers
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  headers: {
+    "X-Custom-Header": "value",
+    "Authorization": "Bearer token"
+  }
+})
+
+const response = await fetch("/api/data")
+```
+
+## How it works
+
+The Node.js implementation connects directly to TEE endpoints via TCP (no proxy required):
+
+1. **TLS Handshake** - Establishes TLS 1.3 with session binding via EKM
+2. **Quote Retrieval** - Fetches attestation quote from the server
+3. **Verification** - Validates quote against policy using Intel DCAP
+4. **Request Execution** - Proceeds with HTTP request over verified channel
+
+All verification happens automatically. The attestation result is exposed on every response for audit logging or policy enforcement.
+
+## Platform support
+
+Supported platforms:
+- macOS (x64, arm64)
+- Linux (x64, arm64)
+- Windows (x64, arm64)
+
+Prebuilt binaries are included for all platforms.
+
+## Error handling
+
+```typescript
+try {
+  const response = await fetch("/api/data")
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+  }
+  const data = await response.json()
+} catch (error) {
+  if (error.message.includes("BootchainMismatch")) {
+    console.error("Bootchain verification failed")
+  } else if (error.message.includes("TcbStatusNotAllowed")) {
+    console.error("TCB status not allowed")
+  } else {
+    console.error("Request failed:", error.message)
+  }
+}
+```
+
+## Related
+
+- [createAtlsAgent](/api/nodejs/create-atls-agent) - For use with `https.request`, axios, or other HTTP clients
+- [Attestation object](/api/nodejs/attestation-object) - Structure of the attestation data
+- [Policy configuration](/policy/overview) - Configure verification requirements

@@ -1,122 +1,132 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Atlas",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#2563eb",
+    "light": "#3b82f6",
+    "dark": "#1e40af"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/concrete-security/atlas"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/concrete-security/atlas"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Get Started",
             "pages": [
-              "index",
+              "introduction",
               "quickstart",
-              "development"
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Core Concepts",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "concepts/atls-protocol",
+              "concepts/tee-attestation",
+              "concepts/session-binding",
+              "concepts/bootchain-verification"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Policy Configuration",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "policy/overview",
+              "policy/dstack-tdx",
+              "policy/tcb-status",
+              "policy/computing-measurements"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Platform Guides",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "platforms/nodejs",
+              "platforms/browser-wasm",
+              "platforms/rust"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/proxy-setup",
+              "deployment/production-checklist",
+              "deployment/security-considerations"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/ai-sdk-integration",
+              "examples/fetch-api",
+              "examples/custom-policies"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "API Reference",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Rust API",
             "pages": [
-              "api-reference/introduction"
+              "api/rust/atls-connect",
+              "api/rust/verifier-trait",
+              "api/rust/policy-types",
+              "api/rust/error-handling"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Node.js API",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "api/nodejs/create-atls-fetch",
+              "api/nodejs/create-atls-agent",
+              "api/nodejs/attestation-object",
+              "api/nodejs/typescript-types"
+            ]
+          },
+          {
+            "group": "Browser/WASM API",
+            "pages": [
+              "api/wasm/create-atls-fetch",
+              "api/wasm/atls-http",
+              "api/wasm/attested-stream"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Design",
+            "pages": [
+              "architecture/overview",
+              "architecture/verification-flow",
+              "architecture/extending-atls"
+            ]
+          },
+          {
+            "group": "Protocol Specification",
+            "pages": [
+              "protocol/tls-handshake",
+              "protocol/quote-retrieval",
+              "protocol/verification-steps"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

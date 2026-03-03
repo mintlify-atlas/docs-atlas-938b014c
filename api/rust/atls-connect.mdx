@@ -1,0 +1,174 @@
+---
+title: atls_connect
+description: Establish a TLS connection with attestation verification
+---
+
+## Function signature
+
+```rust
+pub async fn atls_connect<S>(
+    stream: S,
+    server_name: &str,
+    policy: Policy,
+    alpn: Option<Vec<String>>,
+) -> Result<(TlsStream<S>, Report), AtlsVerificationError>
+where
+    S: AsyncByteStream + 'static,
+```
+
+## Description
+
+Establishes a TLS connection with attestation verification in a single operation. This high-level function combines:
+
+1. TLS handshake with CA certificate verification
+2. Server leaf certificate capture
+3. Verifier creation from policy
+4. Attestation verification over the TLS stream
+5. Returns the verified TLS stream and attestation report
+
+## Parameters
+
+<ParamField path="stream" type="S" required>
+  The underlying transport stream (e.g., `TcpStream`). Must implement `AsyncByteStream`.
+</ParamField>
+
+<ParamField path="server_name" type="&str" required>
+  The server hostname for TLS SNI and verification.
+</ParamField>
+
+<ParamField path="policy" type="Policy" required>
+  The attestation policy determining verifier and configuration. See [Policy types](/api/rust/policy-types).
+</ParamField>
+
+<ParamField path="alpn" type="Option<Vec<String>>">
+  Optional ALPN protocols (e.g., `["http/1.1", "h2"]`).
+</ParamField>
+
+## Return type
+
+<ResponseField name="Result" type="(TlsStream<S>, Report)">
+  Returns a tuple on success:
+  
+  <ResponseField name="TlsStream" type="TlsStream<S>">
+    The established TLS stream ready for encrypted communication.
+  </ResponseField>
+  
+  <ResponseField name="Report" type="Report">
+    The attestation report from the TEE. See [Verifier trait](/api/rust/verifier-trait#report-type) for details.
+  </ResponseField>
+</ResponseField>
+
+## Error handling
+
+Returns `AtlsVerificationError` if:
+- TLS handshake fails
+- Certificate verification fails
+- Attestation verification fails
+- Policy configuration is invalid
+
+See [Error handling](/api/rust/error-handling) for complete error variants.
+
+## Usage examples
+
+### Basic usage with development policy
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+
+async fn connect_to_tee() -> Result<(), Box<dyn std::error::Error>> {
+    // Connect with development policy (relaxed TCB status)
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await?;
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await?;
+
+    // Access report data via pattern matching
+    match &report {
+        atlas_rs::Report::Tdx(tdx_report) => {
+            println!("TCB Status: {}", tdx_report.status);
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### Production usage with custom policy
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+use atlas_rs::tdx::ExpectedBootchain;
+
+async fn connect_with_verification() -> Result<(), Box<dyn std::error::Error>> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await?;
+    
+    // Create policy with expected measurements
+    let policy = Policy::DstackTdx(DstackTdxPolicy {
+        expected_bootchain: Some(ExpectedBootchain {
+            mrtd: "abc123...".to_string(),
+            rtmr0: "def456...".to_string(),
+            rtmr1: "ghi789...".to_string(),
+            rtmr2: "jkl012...".to_string(),
+        }),
+        allowed_tcb_status: vec!["UpToDate".to_string()],
+        ..Default::default()
+    });
+    
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await?;
+    
+    // Use tls_stream for encrypted communication
+    Ok(())
+}
+```
+
+### With ALPN protocols
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+
+async fn connect_with_alpn() -> Result<(), Box<dyn std::error::Error>> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await?;
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    
+    // Specify ALPN protocols
+    let alpn = Some(vec!["h2".to_string(), "http/1.1".to_string()]);
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, alpn).await?;
+    
+    Ok(())
+}
+```
+
+### Loading policy from JSON
+
+```rust
+use atlas_rs::{atls_connect, Policy};
+
+async fn connect_with_json_policy() -> Result<(), Box<dyn std::error::Error>> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await?;
+    
+    // Load policy from JSON configuration
+    let json = r#"{
+        "type": "dstack_tdx",
+        "allowed_tcb_status": ["UpToDate", "SWHardeningNeeded"]
+    }"#;
+    let policy: Policy = serde_json::from_str(json)?;
+    
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await?;
+    
+    Ok(())
+}
+```
+
+## Platform support
+
+This function supports both native (tokio) and WASM platforms:
+
+- **Native**: Uses `tokio_rustls::client::TlsStream`
+- **WASM**: Uses `futures_rustls::client::TlsStream`
+
+The appropriate implementation is selected at compile time via conditional compilation.
+
+## See also
+
+- [Verifier trait](/api/rust/verifier-trait) - Low-level verifier interface
+- [Policy types](/api/rust/policy-types) - Policy configuration options
+- [Error handling](/api/rust/error-handling) - Error types and patterns

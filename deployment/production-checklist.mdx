@@ -1,0 +1,152 @@
+---
+title: Production checklist
+description: Production deployment requirements and security guidelines
+---
+
+This checklist covers the essential requirements for deploying Atlas in production environments.
+
+## Proxy security
+
+<Warning>
+All proxy security items are critical for preventing attacks and must be implemented before production deployment.
+</Warning>
+
+- [ ] **Allowlist contains only authorized TEE endpoints** - Review and validate each endpoint in `ATLS_PROXY_ALLOWLIST`
+- [ ] **Proxy runs with minimal privileges** - Use a non-root user account
+- [ ] **Firewall rules restrict proxy's outbound connections** - Only allow connections to authorized TEE endpoints
+- [ ] **Monitoring for connection patterns and failures** - Track connection attempts, failures, and unusual patterns
+- [ ] **Rate limiting to prevent abuse** - Implement at reverse proxy level
+- [ ] **TLS termination at reverse proxy** - Use `wss://` instead of `ws://` for encrypted WebSocket connections
+- [ ] **Authentication for proxy access** - Implement at reverse proxy level (e.g., API keys, OAuth)
+- [ ] **Regular security updates for dependencies** - Keep Rust toolchain and dependencies up to date
+
+## Policy configuration
+
+<Warning>
+Production deployments must use strict TCB status requirements and full runtime verification. Never use development policies in production.
+</Warning>
+
+### TCB status requirements
+
+- [ ] **Use `allowed_tcb_status: ["UpToDate"]` for production** - Only accept fully patched platforms
+- [ ] **Configure grace period only if required** - Set `grace_period` for time-limited `OutOfDate` acceptance during patch cycles
+- [ ] **Never allow `Revoked` status** - Compromised processors must be rejected
+
+### TCB status values
+
+| Status | Production use | Notes |
+|--------|----------------|-------|
+| `UpToDate` | ✅ Always use | Platform is fully patched |
+| `SWHardeningNeeded` | ⚠️ Use with caution | Verify software implements required mitigations |
+| `ConfigurationNeeded` | ⚠️ Use with caution | Verify threat model tolerates configuration risk |
+| `OutOfDate` | ⚠️ Use with grace period | Only if combined with `grace_period` for patch cycles |
+| `Revoked` | ❌ Never use | Processor or signing keys are compromised |
+
+See the [Intel DCAP Appraisal Engine Developer Guide](https://download.01.org/intel-sgx/latest/dcap-latest/linux/docs/Intel_DCAP_Appraisal_Engine_Developer_Guide_for_Linux.pdf) for more details.
+
+### Runtime verification
+
+- [ ] **Provide bootchain measurements** - Compute `expected_bootchain` (MRTD, RTMR0-2) for your hardware configuration
+- [ ] **Provide OS image hash** - Verify the Dstack image using `os_image_hash`
+- [ ] **Provide app compose** - Specify expected application configuration via `app_compose`
+- [ ] **Never set `disable_runtime_verification: true`** - Runtime verification must be enabled in production
+
+### Example production policy
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy, ExpectedBootchain};
+use serde_json::json;
+
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain {
+        mrtd: "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217".into(),
+        rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418".into(),
+        rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7".into(),
+        rtmr2: "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57".into(),
+    }),
+    os_image_hash: Some("86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a".into()),
+    app_compose: Some(json!({
+        "runner": "docker-compose",
+        "docker_compose_file": "version: '3'\nservices:\n  vllm:\n    image: vllm/vllm-openai:latest\n    ..."
+    })),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    grace_period: Some(30 * 24 * 60 * 60), // 30 days
+    ..Default::default()
+});
+```
+
+## Computing bootchain measurements
+
+<Warning>
+Bootchain measurements depend on your hardware configuration (CPU count, memory, GPUs, etc.). You must compute measurements for your specific deployment.
+</Warning>
+
+Measurements vary based on:
+- CPU count
+- Memory size
+- PCI hole size
+- Number of GPUs
+- Number of NVSwitches
+- Hotplug configuration
+- QEMU version
+
+See the Dstack documentation for instructions on computing bootchain measurements using the `dstack-mr` tool.
+
+## Deployment architecture
+
+### Recommended setup
+
+```
+┌──────────────┐     HTTPS      ┌──────────────┐    WSS     ┌──────────────┐
+│   Browser    │ ──────────────► │    Reverse   │ ─────────► │    Atlas     │
+│              │                 │    Proxy     │            │    Proxy     │
+└──────────────┘                 │  (nginx/     │            │              │
+                                 │   caddy)     │            └──────┬───────┘
+                                 └──────────────┘                   │ TCP
+                                                                    │
+                                                            ┌───────▼────────┐
+                                                            │   TEE Server   │
+                                                            │                │
+                                                            └────────────────┘
+```
+
+### Infrastructure checklist
+
+- [ ] **Reverse proxy configured** - nginx, caddy, or similar for TLS termination
+- [ ] **Process management** - systemd, docker, or kubernetes for automatic restarts
+- [ ] **Health monitoring** - Monitor proxy health and restart on failure
+- [ ] **Log aggregation** - Centralized logging for security auditing
+- [ ] **Metrics collection** - Track connection counts, error rates, latency
+
+## Operational security
+
+### Secret management
+
+<Warning>
+Never commit secrets to version control. Use environment variables or secret management systems.
+</Warning>
+
+- [ ] **TLS certificates secured** - Use proper certificate management
+- [ ] **Policy stored securely** - Protect policy configuration files
+- [ ] **Access control implemented** - Restrict who can modify proxy configuration
+- [ ] **Audit logging enabled** - Log all configuration changes
+
+### Incident response
+
+- [ ] **Security contact defined** - Documented point of contact for security issues
+- [ ] **Incident response plan** - Defined procedures for security incidents
+- [ ] **Backup proxy instances** - Redundancy for high availability
+- [ ] **Rollback procedures** - Ability to quickly revert changes
+
+## Testing
+
+- [ ] **Test attestation verification** - Verify TEE attestation succeeds with production policy
+- [ ] **Test allowlist enforcement** - Verify unauthorized endpoints are rejected
+- [ ] **Test error handling** - Verify graceful degradation on failures
+- [ ] **Load testing** - Verify performance under expected traffic
+- [ ] **Security testing** - Attempt common attacks (SSRF, injection, etc.)
+
+## See also
+
+- [Security considerations](/deployment/security-considerations) - Attack prevention and encryption details
+- [Proxy setup](/deployment/proxy-setup) - WebSocket proxy configuration

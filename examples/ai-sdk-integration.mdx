@@ -1,0 +1,200 @@
+---
+title: AI SDK integration
+description: Connect to LLM inference servers running in TEEs with streaming support
+---
+
+Connect to LLM inference servers (vLLM, etc.) running in Trusted Execution Environments with cryptographic proof of execution before sending prompts.
+
+## Quick start
+
+Create an attested fetch function and pass it to any AI SDK provider:
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+import { createOpenAI } from "@ai-sdk/openai"
+import { streamText } from "ai"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: yourPolicy,
+  onAttestation: (att) => console.log(`TEE verified: ${att.teeType}`)
+})
+
+const openai = createOpenAI({
+  baseURL: "https://enclave.example.com/v1",
+  apiKey: process.env.OPENAI_API_KEY,
+  fetch
+})
+
+// Use .chat() for OpenAI-compatible servers (vLLM, etc.)
+const { textStream } = await streamText({
+  model: openai.chat("your-model"),
+  messages: [{ role: "user", content: "Hello from a verified TEE!" }]
+})
+
+for await (const chunk of textStream) {
+  process.stdout.write(chunk)
+}
+```
+
+<Note>
+Use `openai.chat(model)` instead of `openai(model)` for OpenAI-compatible servers. AI SDK v5's default uses the Responses API which most servers don't support yet.
+</Note>
+
+## Streaming example
+
+Full example with attestation verification and streaming responses:
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+import { createOpenAI } from "@ai-sdk/openai"
+import { streamText } from "ai"
+
+// Configuration
+const target = "vllm.concrete-security.com"
+const model = "openai/gpt-oss-120b"
+const prompt = "Say hello from Node aTLS!"
+
+// Track attestation for summary
+let lastAttestation = null
+
+// Create attested fetch with callback
+const fetch = createAtlsFetch({
+  target,
+  policy: productionPolicy,
+  onAttestation: (attestation) => {
+    lastAttestation = attestation
+    console.log(`✓ TEE verified: ${attestation.teeType.toUpperCase()}`)
+    console.log(`  TCB status: ${attestation.tcbStatus}`)
+    if (attestation.advisoryIds.length > 0) {
+      console.log(`  Advisories: ${attestation.advisoryIds.join(", ")}`)
+    }
+  }
+})
+
+// Create OpenAI client with attested fetch
+const openai = createOpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+  baseURL: `https://${target}/v1`,
+  fetch,
+})
+
+console.log(`Connecting to ${target}...`)
+console.log(`Model: ${model}`)
+console.log(`Prompt: "${prompt}"`)
+
+// Stream the response
+const { textStream } = await streamText({
+  model: openai.chat(model),
+  messages: [{ role: "user", content: prompt }],
+})
+
+process.stdout.write("\nResponse: ")
+for await (const text of textStream) {
+  process.stdout.write(text)
+}
+
+// Print attestation summary
+console.log("\nAttestation Summary:")
+console.log(`  Trusted: ${lastAttestation.trusted ? "✓ Yes" : "✗ No"}`)
+console.log(`  TEE Type: ${lastAttestation.teeType}`)
+console.log(`  TCB Status: ${lastAttestation.tcbStatus}`)
+if (lastAttestation.measurement) {
+  console.log(`  Measurement: ${lastAttestation.measurement.slice(0, 16)}...`)
+}
+```
+
+## Browser usage
+
+Connect from browsers using the WASM bindings with AI SDK:
+
+```javascript
+import { init, createAtlsFetch } from "@concrete-security/atlas-wasm"
+
+await init()
+
+const fetch = createAtlsFetch({
+  proxyUrl: "ws://127.0.0.1:9000",
+  targetHost: "vllm.example.com",
+  policy: { type: "dstack_tdx" },
+  onAttestation: (att) => console.log("TEE:", att.teeType)
+})
+
+// Use with AI SDK (same as Node.js)
+const openai = createOpenAI({
+  baseURL: "https://vllm.example.com/v1",
+  fetch
+})
+
+const { textStream } = await streamText({
+  model: openai.chat("gpt-oss-120b"),
+  messages: [{ role: "user", content: "Hello!" }]
+})
+
+for await (const text of textStream) {
+  console.log(text)
+}
+```
+
+<Note>
+Browser deployments require a WebSocket-to-TCP proxy. See [Browser Setup](/browser/setup) for proxy configuration.
+</Note>
+
+## AI SDK provider wrapper
+
+For applications built on AI SDK, use the `private-ai-sdk` wrapper to secure any AI SDK provider:
+
+```typescript
+import { createAtlasProvider } from "private-ai-sdk"
+import { createAnthropic } from "@ai-sdk/anthropic"
+
+// Wrap any AI SDK provider
+const provider = createAtlasProvider({
+  sdk: createAnthropic,
+  baseURL: "https://tee-endpoint.com/v1",
+  apiKey: process.env.API_KEY,
+  policyFile: "/path/to/cvm_policy.json",
+  onAttestation: (att) => {
+    console.log(`Verified: ${att.teeType}`)
+  }
+})
+
+// Use like a normal AI SDK provider
+const { textStream } = await streamText({
+  model: provider("claude-3-5-sonnet"),
+  messages: [{ role: "user", content: "Hello!" }]
+})
+```
+
+This approach:
+- Works with any AI SDK provider (OpenAI, Anthropic, etc.)
+- Transparently replaces HTTP transport with aTLS
+- Loads policies from JSON files
+- Used by [secure-opencode](https://github.com/concrete-security/secure-opencode)
+
+## Environment variables
+
+Common configuration via environment variables:
+
+```bash
+# Target server
+export ATLS_TARGET="vllm.concrete-security.com:443"
+
+# API credentials
+export OPENAI_API_KEY="your-api-key"
+
+# Model selection
+export OPENAI_MODEL="openai/gpt-oss-120b"
+
+# Debug logging
+export ATLS_DEBUG=1
+
+# Run your script
+node your-script.mjs
+```
+
+## Next steps
+
+- [Custom Policies](/examples/custom-policies) - Configure bootchain verification
+- [Fetch API](/examples/fetch-api) - Advanced fetch patterns
+- [Policy Configuration](/policy/overview) - Full policy reference

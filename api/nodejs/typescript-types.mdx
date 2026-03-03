@@ -1,0 +1,305 @@
+---
+title: TypeScript types
+description: Complete TypeScript type definitions for Atlas Node.js API
+---
+
+Atlas includes full TypeScript type definitions for type-safe development.
+
+## Core types
+
+### AtlsFetch
+
+```typescript
+type AtlsFetch = (input: RequestInfo, init?: RequestInit) => Promise<AtlsResponse>
+```
+
+Fetch-compatible function returned by `createAtlsFetch`.
+
+### AtlsResponse
+
+```typescript
+interface AtlsResponse extends Response {
+  attestation: AtlsAttestation
+}
+```
+
+Extends the standard `Response` with an additional `attestation` property.
+
+### AtlsAttestation
+
+```typescript
+interface AtlsAttestation {
+  trusted: boolean
+  teeType: string
+  measurement: string | null
+  tcbStatus: string
+  advisoryIds: string[]
+}
+```
+
+Attestation verification result. See [Attestation object](/api/nodejs/attestation-object) for field descriptions.
+
+## Configuration types
+
+### AtlsFetchOptions
+
+```typescript
+interface AtlsFetchOptions {
+  target: string
+  policy: Policy
+  serverName?: string
+  headers?: Record<string, string>
+  onAttestation?: (attestation: AtlsAttestation) => void
+}
+```
+
+Configuration object for `createAtlsFetch`.
+
+### AtlsAgentOptions
+
+```typescript
+import type { AgentOptions } from "https"
+
+interface AtlsAgentOptions extends AgentOptions {
+  target: string
+  policy: Policy
+  serverName?: string
+  onAttestation?: (attestation: AtlsAttestation, socket: Socket) => void
+}
+```
+
+Configuration object for `createAtlsAgent`. Extends Node.js `https.AgentOptions`.
+
+## Policy types
+
+### Policy
+
+```typescript
+type Policy = DstackTdxPolicy
+```
+
+Top-level policy type. Currently supports only `DstackTdxPolicy`, but designed for extensibility.
+
+### DstackTdxPolicy
+
+```typescript
+interface DstackTdxPolicy {
+  type: "dstack_tdx"
+  expected_bootchain?: ExpectedBootchain
+  os_image_hash?: string
+  app_compose?: AppCompose
+  allowed_tcb_status: string[]
+  grace_period?: number
+  disable_runtime_verification?: boolean
+  pccs_url?: string
+  cache_collateral?: boolean
+}
+```
+
+DStack TDX verification policy. See [DStack TDX Policy](/policy/dstack-tdx) for field descriptions.
+
+### ExpectedBootchain
+
+```typescript
+interface ExpectedBootchain {
+  mrtd: string
+  rtmr0: string
+  rtmr1: string
+  rtmr2: string
+}
+```
+
+Bootchain measurement expectations. All values are hex-encoded strings.
+
+### AppCompose
+
+```typescript
+interface AppCompose {
+  runner: string
+  docker_compose_file: string
+  allowed_envs?: string[]
+  [key: string]: any
+}
+```
+
+Application configuration for verification.
+
+## Usage examples
+
+### Type-safe fetch usage
+
+```typescript
+import { createAtlsFetch, type AtlsFetch, type AtlsResponse } from "@concrete-security/atlas-node"
+
+const fetch: AtlsFetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate"]
+  }
+})
+
+const response: AtlsResponse = await fetch("/api/data")
+const attestation = response.attestation
+```
+
+### Type-safe policy configuration
+
+```typescript
+import type { DstackTdxPolicy, ExpectedBootchain } from "@concrete-security/atlas-node"
+
+const bootchain: ExpectedBootchain = {
+  mrtd: "b24d3b24e9e3c16012376b52362ca098...",
+  rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8c...",
+  rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1d...",
+  rtmr2: "89e73cedf48f976ffebe8ac1129790ff..."
+}
+
+const policy: DstackTdxPolicy = {
+  type: "dstack_tdx",
+  expected_bootchain: bootchain,
+  os_image_hash: "86b181377635db21c415f9ece8cc8505...",
+  allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"],
+  grace_period: 2592000  // 30 days
+}
+```
+
+### Type-safe attestation callback
+
+```typescript
+import type { AtlsAttestation } from "@concrete-security/atlas-node"
+
+function handleAttestation(attestation: AtlsAttestation): void {
+  if (!attestation.trusted) {
+    throw new Error("Attestation failed")
+  }
+  
+  console.log(`TEE Type: ${attestation.teeType}`)
+  console.log(`Measurement: ${attestation.measurement}`)
+  console.log(`TCB Status: ${attestation.tcbStatus}`)
+  
+  if (attestation.advisoryIds.length > 0) {
+    console.warn(`Active advisories: ${attestation.advisoryIds.join(", ")}`)
+  }
+}
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy,
+  onAttestation: handleAttestation
+})
+```
+
+### Type-safe agent configuration
+
+```typescript
+import { createAtlsAgent, type AtlsAgentOptions } from "@concrete-security/atlas-node"
+import type { Socket } from "net"
+
+const agentOptions: AtlsAgentOptions = {
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate"]
+  },
+  keepAlive: true,
+  keepAliveMsecs: 30000,
+  maxSockets: 50,
+  onAttestation: (attestation, socket: Socket) => {
+    console.log(`Connected to ${attestation.teeType} TEE`)
+    console.log(`Socket: ${socket.remoteAddress}:${socket.remotePort}`)
+  }
+}
+
+const agent = createAtlsAgent(agentOptions)
+```
+
+### Generic policy builder
+
+```typescript
+import type { Policy, DstackTdxPolicy, ExpectedBootchain } from "@concrete-security/atlas-node"
+
+function buildProductionPolicy(
+  bootchain: ExpectedBootchain,
+  osImageHash: string
+): Policy {
+  const policy: DstackTdxPolicy = {
+    type: "dstack_tdx",
+    expected_bootchain: bootchain,
+    os_image_hash: osImageHash,
+    allowed_tcb_status: ["UpToDate"],
+    disable_runtime_verification: false
+  }
+  
+  return policy
+}
+
+const policy = buildProductionPolicy(
+  {
+    mrtd: "b24d3b24...",
+    rtmr0: "24c15e08...",
+    rtmr1: "6e1afb74...",
+    rtmr2: "89e73ced..."
+  },
+  "86b18137..."
+)
+```
+
+### Type guards
+
+```typescript
+import type { Policy, DstackTdxPolicy } from "@concrete-security/atlas-node"
+
+function isDstackTdxPolicy(policy: Policy): policy is DstackTdxPolicy {
+  return policy.type === "dstack_tdx"
+}
+
+function validatePolicy(policy: Policy): void {
+  if (isDstackTdxPolicy(policy)) {
+    if (!policy.allowed_tcb_status || policy.allowed_tcb_status.length === 0) {
+      throw new Error("allowed_tcb_status is required")
+    }
+    
+    if (!policy.disable_runtime_verification) {
+      if (!policy.expected_bootchain) {
+        throw new Error("expected_bootchain is required when runtime verification is enabled")
+      }
+      if (!policy.os_image_hash) {
+        throw new Error("os_image_hash is required when runtime verification is enabled")
+      }
+    }
+  }
+}
+```
+
+## Importing types
+
+```typescript
+// Import types alongside functions
+import { 
+  createAtlsFetch,
+  createAtlsAgent,
+  type AtlsFetch,
+  type AtlsResponse,
+  type AtlsAttestation,
+  type AtlsFetchOptions,
+  type AtlsAgentOptions,
+  type Policy,
+  type DstackTdxPolicy,
+  type ExpectedBootchain 
+} from "@concrete-security/atlas-node"
+
+// Or import only types
+import type { 
+  AtlsFetch,
+  AtlsResponse,
+  AtlsAttestation 
+} from "@concrete-security/atlas-node"
+```
+
+## Related
+
+- [createAtlsFetch](/api/nodejs/create-atls-fetch) - Fetch-compatible API
+- [createAtlsAgent](/api/nodejs/create-atls-agent) - https.Agent API
+- [Attestation object](/api/nodejs/attestation-object) - Attestation data structure
+- [Policy configuration](/policy/overview) - Policy configuration guide

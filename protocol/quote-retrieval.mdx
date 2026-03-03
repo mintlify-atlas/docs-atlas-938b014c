@@ -1,0 +1,382 @@
+---
+title: Quote retrieval
+description: Protocol for fetching attestation quotes and event logs from TEE servers
+---
+
+After TLS handshake, Atlas retrieves attestation evidence from the server to verify it's running in a genuine TEE. For DStack TDX deployments, this uses an HTTP-based protocol over the TLS connection.
+
+## Quote retrieval protocol
+
+The quote retrieval flow:
+
+1. Client generates random nonce
+2. Client sends POST request with nonce and session EKM
+3. Server generates quote with nonce+EKM binding
+4. Server responds with quote and event log
+5. Client parses and validates response
+
+## Nonce generation
+
+Generate a cryptographically random 32-byte nonce:
+
+```rust
+let mut nonce = [0u8; 32];
+rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
+```
+
+The nonce serves two purposes:
+- **Freshness** - Proves the quote was generated for this verification request
+- **Uniqueness** - Prevents replay attacks using cached quotes
+
+<Note>
+The nonce is combined with the session EKM before being included in the quote's `report_data`. This binds the quote to both the verification request and the TLS session.
+</Note>
+
+## HTTP POST request
+
+Send the quote request over the established TLS connection:
+
+```http
+POST /tdx_quote HTTP/1.1
+Host: {hostname}
+Content-Type: application/json
+Content-Length: {length}
+Connection: keep-alive
+
+{"nonce_hex": "{hex_encoded_nonce}"}
+```
+
+### Request format
+
+```json
+{
+  "nonce_hex": "a1b2c3d4..."
+}
+```
+
+- `nonce_hex` - 64-character hex string (32 bytes)
+
+### Implementation
+
+```rust
+let body = serde_json::json!({
+    "nonce_hex": hex::encode(nonce)
+});
+let body_str = body.to_string();
+
+let request = format!(
+    "POST /tdx_quote HTTP/1.1\r\n\
+     Host: {}\r\n\
+     Content-Type: application/json\r\n\
+     Content-Length: {}\r\n\
+     Connection: keep-alive\r\n\
+     \r\n\
+     {}",
+    hostname,
+    body_str.len(),
+    body_str
+);
+
+stream.write_all(request.as_bytes()).await?;
+stream.flush().await?;
+```
+
+<Note>
+The request uses HTTP/1.1 over the TLS stream. The `Connection: keep-alive` header ensures the TLS connection remains open for the response and subsequent application data.
+</Note>
+
+## HTTP response parsing
+
+Read and parse the HTTP response:
+
+```rust
+let mut response_buf = Vec::new();
+let mut chunk = [0u8; 4096];
+
+loop {
+    let n = stream.read(&mut chunk).await?;
+    if n == 0 { break; }
+    response_buf.extend_from_slice(&chunk[..n]);
+
+    // Check if complete (has Content-Length bytes)
+    if let Some(body_start) = find_http_body_start(&response_buf) {
+        if let Some(content_length) = parse_content_length(&response_buf[..body_start]) {
+            if response_buf.len() >= body_start + content_length {
+                break;
+            }
+        }
+    }
+}
+```
+
+### Finding body start
+
+HTTP headers end with `\r\n\r\n` (CRLF CRLF):
+
+```rust
+fn find_http_body_start(data: &[u8]) -> Option<usize> {
+    for i in 0..data.len().saturating_sub(3) {
+        if &data[i..i + 4] == b"\r\n\r\n" {
+            return Some(i + 4);
+        }
+    }
+    None
+}
+```
+
+### Parsing Content-Length
+
+```rust
+fn parse_content_length(headers: &[u8]) -> Option<usize> {
+    let headers_str = std::str::from_utf8(headers).ok()?;
+    for line in headers_str.lines() {
+        if line.to_lowercase().starts_with("content-length:") {
+            let value = line.split(':').nth(1)?.trim();
+            return value.parse().ok();
+        }
+    }
+    None
+}
+```
+
+## Response format
+
+The server responds with JSON containing the quote and event log:
+
+```json
+{
+  "quote": {
+    "quote": "base64_encoded_tdx_quote",
+    "event_log": "base64_encoded_event_log"
+  }
+}
+```
+
+### Response structure
+
+```rust
+#[derive(Debug, serde::Deserialize)]
+struct QuoteEndpointResponse {
+    quote: GetQuoteResponse,
+}
+```
+
+Where `GetQuoteResponse` is from `dstack-sdk-types`:
+
+```rust
+pub struct GetQuoteResponse {
+    pub quote: String,       // Base64-encoded TDX quote
+    pub event_log: String,   // Base64-encoded event log
+}
+```
+
+### Parsing response
+
+```rust
+let body_start = find_http_body_start(&response_buf)
+    .ok_or_else(|| AtlsVerificationError::Io("Invalid HTTP response".into()))?;
+let response_body = &response_buf[body_start..];
+
+let response: QuoteEndpointResponse = serde_json::from_slice(response_body)
+    .map_err(|e| AtlsVerificationError::Quote(
+        format!("Failed to parse /tdx_quote response: {}", e)
+    ))?;
+
+let quote_response = response.quote;
+```
+
+## Decoding quote and event log
+
+### Decode quote bytes
+
+```rust
+let quote_bytes = quote_response
+    .decode_quote()
+    .map_err(|e| AtlsVerificationError::Other(
+        anyhow::anyhow!("Failed to decode quote: {}", e)
+    ))?;
+```
+
+The quote is base64-decoded to produce the raw TDX quote (typically 4-8 KB).
+
+### Parse event log
+
+```rust
+let events = quote_response
+    .decode_event_log()
+    .map_err(|e| AtlsVerificationError::Other(e.into()))?;
+```
+
+The event log is base64-decoded and parsed into structured events:
+
+```rust
+pub struct EventLog {
+    pub event: String,         // Event type (e.g., "compose-hash")
+    pub event_payload: String, // Event data (hex or string)
+    pub pcr: u8,               // PCR/RTMR index
+}
+```
+
+## Event log structure
+
+The event log contains measurements of runtime state:
+
+### Common event types
+
+| Event | Description | Payload Format |
+|-------|-------------|----------------|
+| `compose-hash` | App configuration hash | Hex string (SHA256) |
+| `os-image-hash` | OS image hash | Hex string (SHA256) |
+| `New TLS Certificate` | Certificate hash | Hex-encoded hex string |
+
+### Example events
+
+```json
+[
+  {
+    "event": "compose-hash",
+    "event_payload": "a1b2c3d4...",
+    "pcr": 3
+  },
+  {
+    "event": "os-image-hash",
+    "event_payload": "e5f6g7h8...",
+    "pcr": 3
+  },
+  {
+    "event": "New TLS Certificate",
+    "event_payload": "6a35623263336434...",
+    "pcr": 3
+  }
+]
+```
+
+<Note>
+The "New TLS Certificate" event payload is double-encoded: it's a hex-encoded string that contains another hex string. You must decode it twice to get the certificate hash.
+</Note>
+
+## Quote structure
+
+The TDX quote (after base64 decoding) contains:
+
+### Quote header
+
+- Version (4 bytes)
+- Attestation key type (2 bytes)
+- TEE type (4 bytes - 0x00000081 for TDX)
+- Reserved fields
+
+### TD Report
+
+The core attestation data:
+
+```rust
+pub struct TDReport {
+    pub report_type: [u8; 4],
+    pub report_data: [u8; 64],  // SHA512(nonce || session_ekm)
+    pub mr_td: [u8; 48],        // MRTD measurement
+    pub rt_mr0: [u8; 48],       // RTMR0
+    pub rt_mr1: [u8; 48],       // RTMR1
+    pub rt_mr2: [u8; 48],       // RTMR2
+    pub rt_mr3: [u8; 48],       // RTMR3
+    // ... other fields
+}
+```
+
+Key fields:
+- `report_data` - Contains SHA512(nonce || session_ekm) for binding
+- `mr_td` - MRTD (firmware measurement)
+- `rt_mr0`-`rt_mr3` - Runtime measurements (RTMRs)
+
+### Signature data
+
+The quote includes a signature from the TDX Quoting Enclave (QE):
+
+- ECDSA signature (64 bytes)
+- Public key (64 bytes)
+- Certificate chain
+
+This signature is verified during DCAP verification to prove the quote came from a genuine Intel TDX CPU.
+
+## Error handling
+
+### Network errors
+
+```rust
+AtlsVerificationError::Io(e.to_string())
+```
+
+Caused by:
+- Connection closed unexpectedly
+- Timeout reading response
+- TLS stream error
+
+### Malformed response
+
+```rust
+AtlsVerificationError::Quote(
+    format!("Failed to parse /tdx_quote response: {}", e)
+)
+```
+
+Caused by:
+- Invalid JSON
+- Missing required fields
+- Invalid base64 encoding
+
+### Invalid quote format
+
+```rust
+AtlsVerificationError::Quote(
+    format!("Failed to parse quote: {}", e)
+)
+```
+
+Caused by:
+- Invalid quote version
+- Truncated quote data
+- Unsupported TEE type
+
+## Security considerations
+
+### Nonce freshness
+
+Always generate a fresh nonce for each verification:
+
+```rust
+// GOOD: Fresh nonce per request
+let mut nonce = [0u8; 32];
+rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
+
+// BAD: Reusing nonce allows replay attacks
+const STATIC_NONCE: [u8; 32] = [0; 32];  // DON'T DO THIS
+```
+
+### Session EKM binding
+
+The server MUST include the session EKM in the quote's report_data:
+
+```rust
+// Server side (pseudocode)
+let report_data = SHA512(nonce || session_ekm);
+let quote = generate_quote(report_data);
+```
+
+Without EKM binding, an attacker can relay quotes from a different TLS connection.
+
+### Quote size limits
+
+TDX quotes are typically 4-8 KB. Enforce reasonable limits:
+
+```rust
+if quote_bytes.len() > 16 * 1024 {
+    return Err(AtlsVerificationError::Quote(
+        "Quote exceeds maximum size".into()
+    ));
+}
+```
+
+## See also
+
+- [TLS handshake](/protocol/tls-handshake) - Session establishment and EKM extraction
+- [Verification steps](/protocol/verification-steps) - Quote verification and measurement checks

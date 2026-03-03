@@ -1,0 +1,384 @@
+---
+title: Error handling
+description: Error types and handling patterns for aTLS verification
+---
+
+## AtlsVerificationError
+
+All aTLS verification operations return `Result<T, AtlsVerificationError>`. This enum covers all possible failure modes during attestation verification.
+
+### Definition
+
+```rust
+#[derive(Debug, Error)]
+pub enum AtlsVerificationError {
+    Io(String),
+    Quote(String),
+    BootchainMismatch { field: String, expected: String, actual: String },
+    RtmrMismatch { index: u8, expected: String, actual: String },
+    CertificateNotInEventLog,
+    EventLogParse(String),
+    TeeTypeMismatch(String),
+    AppComposeHashMismatch { expected: String, actual: String },
+    OsImageHashMismatch { expected: String, actual: Option<String> },
+    TcbStatusNotAllowed { status: String, allowed: Vec<String> },
+    TcbInfoError(String),
+    GracePeriodExpired { status: String, tcb_date: String, grace_period_secs: u64 },
+    ReportDataMismatch { expected: String, actual: String },
+    Configuration(String),
+    TlsHandshake(String),
+    InvalidServerName(String),
+    MissingCertificate,
+    Other(anyhow::Error),
+}
+```
+
+## Error variants
+
+### I/O errors
+
+<ResponseField name="Io" type="String">
+  I/O error during communication with the TEE.
+  
+  **Example**: Network disconnection, timeout, or stream closed prematurely.
+</ResponseField>
+
+### Quote verification errors
+
+<ResponseField name="Quote" type="String">
+  Quote verification failed. The TEE quote could not be validated.
+  
+  **Example**: Invalid quote signature, expired collateral, or unsupported quote version.
+</ResponseField>
+
+### Measurement errors
+
+<ResponseField name="BootchainMismatch" type="{ field, expected, actual }">
+  Bootchain measurement does not match expected value.
+  
+  <ResponseField name="field" type="String">
+    The bootchain field that mismatched (e.g., "mrtd", "rtmr0").
+  </ResponseField>
+  
+  <ResponseField name="expected" type="String">
+    The expected measurement value.
+  </ResponseField>
+  
+  <ResponseField name="actual" type="String">
+    The actual measurement value received.
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="RtmrMismatch" type="{ index, expected, actual }">
+  RTMR measurement does not match expected value.
+  
+  <ResponseField name="index" type="u8">
+    The RTMR index (0-3).
+  </ResponseField>
+  
+  <ResponseField name="expected" type="String">
+    The expected RTMR value.
+  </ResponseField>
+  
+  <ResponseField name="actual" type="String">
+    The actual RTMR value received.
+  </ResponseField>
+</ResponseField>
+
+### Certificate and event log errors
+
+<ResponseField name="CertificateNotInEventLog">
+  The TLS certificate was not found in the event log. This indicates the certificate is not bound to the TEE.
+</ResponseField>
+
+<ResponseField name="EventLogParse" type="String">
+  Failed to parse the event log.
+  
+  **Example**: Malformed event log format or unsupported event types.
+</ResponseField>
+
+### TEE type errors
+
+<ResponseField name="TeeTypeMismatch" type="String">
+  The TEE type does not match expectations.
+  
+  **Example**: Expected TDX but received SNP attestation.
+</ResponseField>
+
+### Application verification errors
+
+<ResponseField name="AppComposeHashMismatch" type="{ expected, actual }">
+  App compose hash does not match expected value.
+  
+  <ResponseField name="expected" type="String">
+    The expected app compose hash.
+  </ResponseField>
+  
+  <ResponseField name="actual" type="String">
+    The actual app compose hash received.
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="OsImageHashMismatch" type="{ expected, actual }">
+  OS image hash does not match expected value.
+  
+  <ResponseField name="expected" type="String">
+    The expected OS image hash.
+  </ResponseField>
+  
+  <ResponseField name="actual" type="Option<String>">
+    The actual OS image hash received (if present).
+  </ResponseField>
+</ResponseField>
+
+### TCB status errors
+
+<ResponseField name="TcbStatusNotAllowed" type="{ status, allowed }">
+  TCB status is not in the allowed list.
+  
+  <ResponseField name="status" type="String">
+    The actual TCB status received.
+  </ResponseField>
+  
+  <ResponseField name="allowed" type="Vec<String>">
+    The list of allowed TCB status values.
+  </ResponseField>
+</ResponseField>
+
+<ResponseField name="TcbInfoError" type="String">
+  TCB info could not be determined or parsed.
+  
+  **Example**: Missing TCB info in collateral or invalid format.
+</ResponseField>
+
+<ResponseField name="GracePeriodExpired" type="{ status, tcb_date, grace_period_secs }">
+  Grace period expired for an OutOfDate platform.
+  
+  <ResponseField name="status" type="String">
+    The TCB status (typically "OutOfDate").
+  </ResponseField>
+  
+  <ResponseField name="tcb_date" type="String">
+    The platform TCB date.
+  </ResponseField>
+  
+  <ResponseField name="grace_period_secs" type="u64">
+    The configured grace period in seconds.
+  </ResponseField>
+</ResponseField>
+
+### Session binding errors
+
+<ResponseField name="ReportDataMismatch" type="{ expected, actual }">
+  Report data does not match expected value. This indicates a possible replay or relay attack.
+  
+  <ResponseField name="expected" type="String">
+    The expected report data (typically derived from TLS session EKM).
+  </ResponseField>
+  
+  <ResponseField name="actual" type="String">
+    The actual report data from the quote.
+  </ResponseField>
+</ResponseField>
+
+### Configuration errors
+
+<ResponseField name="Configuration" type="String">
+  Policy or verifier configuration error.
+  
+  **Example**: Invalid TCB status value, missing required fields, or invalid hex strings.
+</ResponseField>
+
+### TLS errors
+
+<ResponseField name="TlsHandshake" type="String">
+  TLS handshake failed.
+  
+  **Example**: Certificate validation failure, protocol version mismatch, or cipher suite negotiation failure.
+</ResponseField>
+
+<ResponseField name="InvalidServerName" type="String">
+  Invalid server name for TLS SNI.
+  
+  **Example**: Malformed hostname or unsupported characters.
+</ResponseField>
+
+<ResponseField name="MissingCertificate">
+  Missing server certificate after TLS handshake. The server did not provide a certificate.
+</ResponseField>
+
+### Other errors
+
+<ResponseField name="Other" type="anyhow::Error">
+  Other errors not covered by specific variants. See the contained error for details.
+</ResponseField>
+
+## Error handling patterns
+
+### Basic error handling
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+
+async fn connect() -> Result<(), AtlsVerificationError> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await
+        .map_err(|e| AtlsVerificationError::Io(e.to_string()))?;
+    
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await?;
+    
+    Ok(())
+}
+```
+
+### Pattern matching on errors
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+
+async fn connect_with_error_handling() {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await.unwrap();
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    
+    match atls_connect(tcp, "tee.example.com", policy, None).await {
+        Ok((tls_stream, report)) => {
+            println!("Connection successful!");
+        }
+        Err(AtlsVerificationError::TcbStatusNotAllowed { status, allowed }) => {
+            eprintln!("TCB status {} not allowed. Allowed: {:?}", status, allowed);
+        }
+        Err(AtlsVerificationError::BootchainMismatch { field, expected, actual }) => {
+            eprintln!("Bootchain mismatch in {}: expected {}, got {}", field, expected, actual);
+        }
+        Err(AtlsVerificationError::ReportDataMismatch { expected, actual }) => {
+            eprintln!("Possible replay attack! Report data mismatch");
+        }
+        Err(e) => {
+            eprintln!("Verification failed: {}", e);
+        }
+    }
+}
+```
+
+### Retry logic for transient errors
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+use tokio::time::{sleep, Duration};
+
+async fn connect_with_retry(max_retries: u32) -> Result<(), AtlsVerificationError> {
+    for attempt in 0..max_retries {
+        let tcp = match tokio::net::TcpStream::connect("tee.example.com:443").await {
+            Ok(tcp) => tcp,
+            Err(e) => {
+                eprintln!("Connection attempt {} failed: {}", attempt + 1, e);
+                sleep(Duration::from_secs(2u64.pow(attempt))).await;
+                continue;
+            }
+        };
+        
+        let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+        
+        match atls_connect(tcp, "tee.example.com", policy, None).await {
+            Ok((tls_stream, report)) => return Ok(()),
+            Err(AtlsVerificationError::Io(_)) | 
+            Err(AtlsVerificationError::TlsHandshake(_)) => {
+                // Retry transient errors
+                eprintln!("Attempt {} failed, retrying...", attempt + 1);
+                sleep(Duration::from_secs(2u64.pow(attempt))).await;
+                continue;
+            }
+            Err(e) => {
+                // Don't retry verification failures
+                return Err(e);
+            }
+        }
+    }
+    
+    Err(AtlsVerificationError::Io("Max retries exceeded".to_string()))
+}
+```
+
+### Logging errors
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+use log::error;
+
+async fn connect_with_logging() -> Result<(), AtlsVerificationError> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await
+        .map_err(|e| {
+            error!("TCP connection failed: {}", e);
+            AtlsVerificationError::Io(e.to_string())
+        })?;
+    
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await
+        .map_err(|e| {
+            error!("aTLS verification failed: {}", e);
+            e
+        })?;
+    
+    Ok(())
+}
+```
+
+### Converting to application errors
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+enum AppError {
+    #[error("Network error: {0}")]
+    Network(String),
+    
+    #[error("Security verification failed: {0}")]
+    Security(String),
+    
+    #[error("Configuration error: {0}")]
+    Config(String),
+}
+
+impl From<AtlsVerificationError> for AppError {
+    fn from(err: AtlsVerificationError) -> Self {
+        match err {
+            AtlsVerificationError::Io(e) |
+            AtlsVerificationError::TlsHandshake(e) => AppError::Network(e),
+            
+            AtlsVerificationError::Configuration(e) |
+            AtlsVerificationError::InvalidServerName(e) => AppError::Config(e),
+            
+            e => AppError::Security(e.to_string()),
+        }
+    }
+}
+
+async fn connect_app() -> Result<(), AppError> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await
+        .map_err(|e| AppError::Network(e.to_string()))?;
+    
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    let (tls_stream, report) = atls_connect(tcp, "tee.example.com", policy, None).await?;
+    
+    Ok(())
+}
+```
+
+## Security considerations
+
+When handling errors:
+
+1. **Never ignore verification errors**: All verification failures indicate potential security issues
+2. **Log security errors**: Always log measurement mismatches and report data mismatches
+3. **Don't retry verification failures**: Only retry transient network/TLS errors
+4. **Treat `ReportDataMismatch` as critical**: This indicates a possible replay or relay attack
+5. **Don't expose internal details**: Sanitize error messages shown to end users
+
+## See also
+
+- [atls_connect](/api/rust/atls-connect) - High-level connection API
+- [Policy types](/api/rust/policy-types) - Policy configuration
+- [Verifier trait](/api/rust/verifier-trait) - Low-level verifier interface

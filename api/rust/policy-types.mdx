@@ -1,0 +1,286 @@
+---
+title: Policy types
+description: Attestation policy configuration types and options
+---
+
+## Policy enum
+
+The `Policy` enum determines which verifier to use and its configuration. Policies can be serialized/deserialized with serde, making them easy to load from JSON configuration files.
+
+### Definition
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Policy {
+    #[serde(rename = "dstack_tdx")]
+    DstackTdx(DstackTdxPolicy),
+}
+```
+
+### Methods
+
+```rust
+impl Policy {
+    /// Convert this policy into its corresponding verifier.
+    pub fn into_verifier(self) -> Result<Verifier, AtlsVerificationError>
+}
+```
+
+### Usage examples
+
+#### Default policy
+
+```rust
+use atlas_rs::Policy;
+
+let policy = Policy::default();
+```
+
+#### Development policy
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy};
+
+let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+```
+
+#### From JSON
+
+```rust
+use atlas_rs::Policy;
+
+let json = r#"{
+    "type": "dstack_tdx",
+    "allowed_tcb_status": ["UpToDate", "SWHardeningNeeded"]
+}"#;
+let policy: Policy = serde_json::from_str(json).unwrap();
+```
+
+## DstackTdxPolicy
+
+Policy configuration for dstack TDX verification.
+
+### Definition
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DstackTdxPolicy {
+    pub expected_bootchain: Option<ExpectedBootchain>,
+    pub app_compose: Option<serde_json::Value>,
+    pub os_image_hash: Option<String>,
+    pub allowed_tcb_status: Vec<String>,
+    pub grace_period: Option<u64>,
+    pub pccs_url: Option<String>,
+    pub cache_collateral: bool,
+    pub disable_runtime_verification: bool,
+}
+```
+
+### Fields
+
+<ParamField path="expected_bootchain" type="Option<ExpectedBootchain>">
+  Expected bootchain measurements (MRTD, RTMR0-2). Required unless `disable_runtime_verification` is true.
+</ParamField>
+
+<ParamField path="app_compose" type="Option<serde_json::Value>">
+  Expected app compose configuration. Required unless `disable_runtime_verification` is true.
+</ParamField>
+
+<ParamField path="os_image_hash" type="Option<String>">
+  Expected OS image hash (SHA256, lowercase hex). Required unless `disable_runtime_verification` is true.
+</ParamField>
+
+<ParamField path="allowed_tcb_status" type="Vec<String>" default='["UpToDate"]'>
+  Allowed TCB status values. Valid values: `UpToDate`, `OutOfDate`, `ConfigurationNeeded`, `TDRelaunchAdvised`, `SWHardeningNeeded`, `Revoked`.
+</ParamField>
+
+<ParamField path="grace_period" type="Option<u64>">
+  Grace period in seconds for `OutOfDate` platforms. If set, requires `allowed_tcb_status` to include `OutOfDate`. Platform is allowed only if `tcb_date + grace_period >= current_time`.
+</ParamField>
+
+<ParamField path="pccs_url" type="Option<String>" default='"https://pccs.phala.network/tdx/certification/v4"'>
+  PCCS URL for collateral fetching.
+</ParamField>
+
+<ParamField path="cache_collateral" type="bool" default={false}>
+  Cache collateral to avoid repeated fetches.
+</ParamField>
+
+<ParamField path="disable_runtime_verification" type="bool" default={false}>
+  Disable runtime verification (NOT RECOMMENDED for production). When false, all runtime fields (`expected_bootchain`, `app_compose`, `os_image_hash`) must be provided. Set to true only for development/testing.
+</ParamField>
+
+### Methods
+
+```rust
+impl DstackTdxPolicy {
+    /// Relaxed policy for development.
+    pub fn dev() -> Self
+    
+    /// Validate the policy configuration.
+    pub fn validate(&self) -> Result<(), AtlsVerificationError>
+}
+```
+
+### Usage examples
+
+#### Default production policy
+
+```rust
+use atlas_rs::DstackTdxPolicy;
+use atlas_rs::tdx::ExpectedBootchain;
+
+let policy = DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain {
+        mrtd: "abc123...".to_string(),
+        rtmr0: "def456...".to_string(),
+        rtmr1: "ghi789...".to_string(),
+        rtmr2: "jkl012...".to_string(),
+    }),
+    app_compose: Some(serde_json::json!({
+        "runner": "docker-compose",
+        "docker_compose_file": "..."
+    })),
+    os_image_hash: Some("86b181...".to_string()),
+    allowed_tcb_status: vec!["UpToDate".to_string()],
+    ..Default::default()
+};
+```
+
+#### Development policy
+
+```rust
+use atlas_rs::DstackTdxPolicy;
+
+// Accepts UpToDate, SWHardeningNeeded, and OutOfDate
+// Disables runtime verification
+let policy = DstackTdxPolicy::dev();
+```
+
+#### With grace period
+
+```rust
+use atlas_rs::DstackTdxPolicy;
+
+let policy = DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".to_string(), "OutOfDate".to_string()],
+    grace_period: Some(3600), // 1 hour grace period
+    disable_runtime_verification: true,
+    ..Default::default()
+};
+```
+
+#### From JSON
+
+```rust
+use atlas_rs::DstackTdxPolicy;
+
+let json = r#"{
+    "expected_bootchain": {
+        "mrtd": "abc123...",
+        "rtmr0": "def456...",
+        "rtmr1": "ghi789...",
+        "rtmr2": "jkl012..."
+    },
+    "allowed_tcb_status": ["UpToDate", "SWHardeningNeeded"],
+    "pccs_url": "https://pccs.example.com/tdx/v4"
+}"#;
+let policy: DstackTdxPolicy = serde_json::from_str(json).unwrap();
+```
+
+## ExpectedBootchain
+
+Expected bootchain measurements for verification. These measurements represent the known-good values for TDX bootchain components.
+
+### Definition
+
+```rust
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedBootchain {
+    pub mrtd: String,
+    pub rtmr0: String,
+    pub rtmr1: String,
+    pub rtmr2: String,
+}
+```
+
+### Fields
+
+<ParamField path="mrtd" type="String" required>
+  MRTD - Initial TD memory contents (TDVF/firmware). Hash of the initial TD memory layout, including the firmware/TDVF that runs before the OS kernel. Must be lowercase hex string.
+</ParamField>
+
+<ParamField path="rtmr0" type="String" required>
+  RTMR0 - Virtual hardware environment. Measures the virtual hardware configuration and TD configuration. Must be lowercase hex string.
+</ParamField>
+
+<ParamField path="rtmr1" type="String" required>
+  RTMR1 - Linux kernel. Measures the Linux kernel loaded into the TD. Must be lowercase hex string.
+</ParamField>
+
+<ParamField path="rtmr2" type="String" required>
+  RTMR2 - Kernel cmdline + initramfs. Measures the kernel command line parameters and initial ramdisk. Must be lowercase hex string.
+</ParamField>
+
+### Usage example
+
+```rust
+use atlas_rs::tdx::ExpectedBootchain;
+
+let bootchain = ExpectedBootchain {
+    mrtd: "abc123...".to_string(),
+    rtmr0: "def456...".to_string(),
+    rtmr1: "ghi789...".to_string(),
+    rtmr2: "jkl012...".to_string(),
+};
+```
+
+## TCB status values
+
+The following TCB status values are recognized:
+
+```rust
+pub const TCB_STATUS_LIST: &[&str] = &[
+    "UpToDate",
+    "OutOfDate",
+    "ConfigurationNeeded",
+    "TDRelaunchAdvised",
+    "SWHardeningNeeded",
+    "Revoked",
+];
+```
+
+### Status descriptions
+
+- **UpToDate**: Platform TCB is up to date
+- **OutOfDate**: Platform TCB is out of date and should be updated
+- **ConfigurationNeeded**: Platform configuration needs to be updated
+- **TDRelaunchAdvised**: TD should be relaunched to apply updates
+- **SWHardeningNeeded**: Additional software hardening is needed
+- **Revoked**: Platform TCB has been revoked
+
+### Production recommendations
+
+For production environments:
+- Use `["UpToDate"]` for strictest security
+- Consider `["UpToDate", "SWHardeningNeeded"]` if you understand the security implications
+- Use `grace_period` with `OutOfDate` to allow time for platform updates
+- Never allow `Revoked` status
+
+## Validation rules
+
+The `DstackTdxPolicy::validate()` method checks:
+
+1. All `allowed_tcb_status` values are in `TCB_STATUS_LIST`
+2. `os_image_hash` is a valid lowercase hex string (if provided)
+3. All `expected_bootchain` fields are valid lowercase hex strings (if provided)
+4. `grace_period` requires `allowed_tcb_status` to include `OutOfDate`
+5. If `disable_runtime_verification` is false, `expected_bootchain`, `app_compose`, and `os_image_hash` must be provided (enforced at verifier build time)
+
+## See also
+
+- [atls_connect](/api/rust/atls-connect) - High-level connection API
+- [Verifier trait](/api/rust/verifier-trait) - Low-level verifier interface
+- [Error handling](/api/rust/error-handling) - Error types
+- [BOOTCHAIN-VERIFICATION.md](https://github.com/anthropics/atls/blob/main/core/BOOTCHAIN-VERIFICATION.md) - Expected measurement derivation

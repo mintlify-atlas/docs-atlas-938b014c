@@ -1,0 +1,220 @@
+---
+title: Bootchain verification
+description: Verify the complete boot chain and runtime state using MRTD and RTMR measurement registers
+---
+
+## What is bootchain verification
+
+Bootchain verification ensures that a TEE is running the exact firmware, operating system, and application configuration you expect. It works by comparing cryptographic measurements captured during boot against known-good reference values.
+
+<Info>
+  Bootchain measurements are hardware-specific. The same software stack produces different measurements on machines with different CPU counts, memory sizes, or GPU configurations.
+</Info>
+
+## TDX measurement registers
+
+Intel TDX uses measurement registers to record the boot chain and runtime state:
+
+### MRTD (Measurement Register of Trust Domain)
+
+MRTD measures the initial TD configuration established before the TD starts executing:
+
+- TD firmware (TDVF)
+- Initial memory layout
+- CPU and memory configuration
+- Virtual firmware configuration
+
+MRTD is computed by the CPU during TD initialization and cannot be modified after the TD starts.
+
+### RTMR registers (Runtime Measurement Registers)
+
+TDX provides four runtime measurement registers (RTMR0-RTMR3) that are extended during boot and runtime:
+
+#### RTMR0
+
+Measures the bootloader and early boot components:
+
+- Boot loader (GRUB, systemd-boot, etc.)
+- Boot configuration
+- Kernel command line
+
+#### RTMR1
+
+Measures the kernel and initial ramdisk:
+
+- Linux kernel image
+- initramfs
+- Kernel modules loaded during early boot
+
+#### RTMR2
+
+Measures the operating system and system configuration:
+
+- Root filesystem
+- System services
+- OS configuration files
+
+#### RTMR3
+
+Measures runtime application state:
+
+- Application containers and images
+- Application configuration
+- TLS certificate binding events
+
+<Note>
+  RTMR3 is special because it is extended at runtime with an event log. The client replays the event log to verify RTMR3 and extract the certificate binding.
+</Note>
+
+## Measurement verification
+
+Atlas performs bootchain verification by comparing quote measurements against expected values:
+
+### Expected bootchain configuration
+
+You provide expected measurements in your policy:
+
+```rust
+ExpectedBootchain {
+    mrtd: "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+    rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418",
+    rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7",
+    rtmr2: "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57",
+}
+```
+
+### Verification process
+
+1. **Quote retrieval** - Client requests a TDX quote from the server
+2. **Quote validation** - Verify the quote's cryptographic signature
+3. **MRTD verification** - Compare `quote.mrtd` against `expected_bootchain.mrtd`
+4. **RTMR0 verification** - Compare `quote.rtmr0` against `expected_bootchain.rtmr0`
+5. **RTMR1 verification** - Compare `quote.rtmr1` against `expected_bootchain.rtmr1`
+6. **RTMR2 verification** - Compare `quote.rtmr2` against `expected_bootchain.rtmr2`
+7. **RTMR3 verification** - Replay the event log and verify the computed value matches `quote.rtmr3`
+
+If any measurement doesn't match, verification fails with a `BootchainMismatch` error.
+
+## Event log replay
+
+RTMR3 verification requires replaying the event log:
+
+### Event log structure
+
+The event log contains ordered entries for runtime events:
+
+```json
+[
+  {
+    "event_type": "container_start",
+    "digest": "sha256:abcd...",
+    "data": {...}
+  },
+  {
+    "event_type": "tls_cert_binding",
+    "cert_hash": "sha256:1234...",
+    "data": {...}
+  }
+]
+```
+
+### Replay process
+
+1. Start with an initial RTMR3 value (usually zeros)
+2. For each event in order:
+   - Hash the event data
+   - Extend RTMR3: `rtmr3 = SHA384(rtmr3 || event_hash)`
+3. Verify the final computed RTMR3 matches the value in the quote
+
+<Note>
+  The event log must be replayed in exact order. Reordering events produces a different final measurement.
+</Note>
+
+### Certificate binding verification
+
+During event log replay, Atlas locates the TLS certificate binding event:
+
+1. Find the event with type `tls_cert_binding`
+2. Extract the certificate public key hash from the event
+3. Compute the hash of the server's TLS certificate
+4. Verify that `event.cert_hash == SHA256(server_cert.pubkey)`
+
+This proves the TEE owns the TLS private key used for the connection.
+
+## Computing bootchain measurements
+
+Bootchain measurements depend on hardware configuration and must be computed for your specific deployment.
+
+### Why measurements vary
+
+The same software stack produces different measurements when:
+
+- CPU count changes
+- Memory size changes
+- GPU configuration changes
+- BIOS settings change
+- Boot order changes
+
+### Measurement computation process
+
+1. **Deploy your workload** in the target TEE environment
+2. **Extract measurements** from a quote generated by that environment
+3. **Record measurements** as your expected bootchain values
+4. **Use those values** in your verification policy
+
+<Info>
+  For detailed instructions on computing bootchain measurements, see the source repository's BOOTCHAIN-VERIFICATION.md file.
+</Info>
+
+## Runtime verification policy
+
+Atlas provides flexible runtime verification configuration:
+
+### Full verification (production)
+
+All runtime fields are required:
+
+```rust
+DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain { ... }),
+    os_image_hash: Some("86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a"),
+    app_compose: Some(json!({ ... })),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    ..Default::default()
+}
+```
+
+### Development mode (relaxed verification)
+
+For testing, use `DstackTdxPolicy::dev()` which:
+
+- Accepts more TCB statuses
+- Disables bootchain verification
+- Disables OS image hash verification
+- Disables app configuration verification
+- Still verifies the TEE attestation signature and session binding
+
+<Note>
+  Development mode should never be used in production. It skips critical security checks.
+</Note>
+
+## Error handling
+
+Bootchain verification can fail with specific errors:
+
+```rust
+AtlsVerificationError::BootchainMismatch {
+    field: "rtmr1",
+    expected: "6e1afb74...",
+    actual: "7f2bgc85...",
+}
+```
+
+Common causes:
+
+- Deployment uses different hardware configuration than measurement source
+- Software stack has been updated
+- Boot configuration changed
+- Using measurements from a different deployment
+
+To fix: recompute measurements from your actual deployment environment.

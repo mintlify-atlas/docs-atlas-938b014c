@@ -1,0 +1,248 @@
+---
+title: Security considerations
+description: Security architecture and attack prevention in Atlas
+---
+
+Atlas implements multiple layers of security to protect against attacks and ensure the integrity of TEE connections.
+
+## End-to-end encryption
+
+TLS encryption is end-to-end from the browser to the TEE. The proxy never has access to plaintext traffic.
+
+```
+Browser                     Proxy                       TEE
+   │                          │                          │
+   │─── ws://proxy?target=X ─►│                          │
+   │                          │─ Check allowlist         │
+   │                          │  ✓ Allowed: forward      │
+   │                          │  ✗ Denied: reject        │
+   │                          │                          │
+   │                          │──── TCP connect ────────►│
+   │◄──── Encrypted tunnel (TLS inside WebSocket) ──────►│
+```
+
+**Key properties:**
+- Proxy performs byte-level forwarding only
+- No TLS termination at the proxy
+- All attestation verification happens in the browser
+- Proxy cannot decrypt, modify, or inspect traffic
+
+## SSRF prevention
+
+<Warning>
+Server-Side Request Forgery (SSRF) attacks allow malicious clients to use the proxy to access internal network resources. The allowlist is critical for preventing these attacks.
+</Warning>
+
+### Allowlist enforcement
+
+The `ATLS_PROXY_ALLOWLIST` environment variable prevents SSRF attacks by restricting target endpoints:
+
+1. Client requests connection to target (via query param or default)
+2. Proxy checks if target is in `ATLS_PROXY_ALLOWLIST`
+3. If not allowed → connection rejected
+4. If allowed → WebSocket tunnel established
+
+### Configuration requirements
+
+```bash
+# Required: Set allowlist before starting proxy
+export ATLS_PROXY_ALLOWLIST="tee1.example.com:443,tee2.example.com:443"
+export ATLS_PROXY_LISTEN="0.0.0.0:9000"
+
+cargo run --release -p atlas-proxy
+```
+
+<Warning>
+The proxy rejects all connections by default if `ATLS_PROXY_ALLOWLIST` is not set. This is a security feature, not a bug.
+</Warning>
+
+### Additional SSRF protections
+
+- **Firewall rules** - Restrict proxy's outbound connections at the network level
+- **DNS validation** - Verify domain names resolve to expected IP addresses
+- **Port restrictions** - Only allow standard ports (443, 8443) in production
+- **Internal network blocking** - Block RFC 1918 private IP ranges if not needed
+
+## Session binding via EKM
+
+Atlas binds attestations to specific TLS sessions using **Exported Keying Material (EKM)** per [RFC 5705](https://datatracker.ietf.org/doc/html/rfc5705), [RFC 8446 Section 7.5](https://datatracker.ietf.org/doc/html/rfc8446#section-7.5), and [RFC 9266](https://datatracker.ietf.org/doc/html/rfc9266).
+
+### Why session binding matters
+
+Without session binding, an attacker with a compromised private key could relay attestations across different TLS sessions. Session binding prevents this attack by cryptographically tying each attestation to its specific TLS connection.
+
+### How it works
+
+1. After TLS handshake, both client and server extract a 32-byte session-specific EKM using the label `"EXPORTER-Channel-Binding"`
+2. Client generates a random 32-byte nonce for freshness
+3. Both parties compute `report_data = SHA512(nonce || session_ekm)`
+4. Server generates a TDX quote with this computed `report_data`
+5. Client verifies the quote, ensuring the `report_data` matches its own computation
+
+Since the EKM is derived from the TLS session's master secret (unique per session), each attestation is cryptographically bound to its specific TLS connection.
+
+### Properties
+
+- **Always enabled** - No configuration needed
+- **Transparent** - Works automatically with all aTLS connections
+- **Standards-based** - Uses RFC 9266 channel binding for TLS 1.3
+- **Defense-in-depth** - Protects against key compromise scenarios
+
+## Attestation security
+
+### Certificate binding
+
+The TEE's TLS certificate is cryptographically bound to the attestation through the event log:
+
+1. Server generates TLS certificate
+2. Certificate public key hash is recorded in RTMR3 event log
+3. Client verifies event log during attestation
+4. Client ensures certificate matches the attested workload
+
+This prevents an attacker from presenting a valid attestation with a different certificate.
+
+### Quote verification flow
+
+1. **Validate quote signature** - Using Intel PCCS collateral (DCAP verification)
+2. **Verify session binding** - Ensure `report_data` equals `SHA512(nonce || session_ekm)`
+3. **Replay event log** - Recompute RTMR3 by replaying every event log entry
+4. **Verify certificate binding** - Locate TLS key binding event in the event log
+5. **Verify bootchain** - Check MRTD, RTMR0-2 against policy
+6. **Verify app configuration** - Check app compose hash matches expected
+7. **Verify OS image** - Check OS image hash matches expected
+
+### Attack prevention matrix
+
+| Attack vector | Mitigation |
+|---------------|------------|
+| SSRF to internal services | Allowlist enforcement |
+| Traffic inspection | Proxy cannot decrypt TLS (end-to-end encryption) |
+| Attestation replay | Session binding via EKM |
+| Certificate substitution | Certificate binding in event log |
+| Bootchain modification | MRTD and RTMR0-2 verification |
+| App tampering | App compose hash verification |
+| OS image tampering | OS image hash verification |
+| TCB downgrade | TCB status verification with `allowed_tcb_status` |
+
+## TCB verification
+
+<Warning>
+Trusted Computing Base (TCB) status indicates the security posture of the TEE platform. Production deployments should only accept `UpToDate` status or use grace periods for controlled rollouts.
+</Warning>
+
+### TCB status values
+
+| Status | Meaning | Production use |
+|--------|---------|----------------|
+| `UpToDate` | Platform is fully patched | ✅ Always use |
+| `SWHardeningNeeded` | Software requires specific hardening mitigations | ⚠️ Use if software implements necessary mitigations |
+| `ConfigurationNeeded` | BIOS/hardware configuration does not meet security baseline | ⚠️ Use if threat model tolerates configuration risk |
+| `OutOfDate` | Platform TCB level is lower than latest version | ⚠️ Use only with grace period for patch cycles |
+| `Revoked` | Processor or signing keys have been compromised | ❌ Never use |
+
+### Grace period configuration
+
+The `grace_period` field allows time-limited acceptance of `OutOfDate` TCB status:
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy};
+
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into(), "OutOfDate".into()],
+    grace_period: Some(30 * 24 * 60 * 60), // 30 days in seconds
+    // ... other fields
+    ..Default::default()
+});
+```
+
+- `grace_period: Some(0)` - No grace window (reject immediately)
+- `grace_period: Some(seconds)` - Allow `OutOfDate` for specified duration
+- `grace_period: None` - No time-based restrictions
+
+## Runtime verification
+
+<Warning>
+Production deployments must enable full runtime verification. Never set `disable_runtime_verification: true` in production.
+</Warning>
+
+### Required fields
+
+When runtime verification is enabled (default), all of these fields are required:
+
+- **`expected_bootchain`** - MRTD and RTMR0-2 measurements
+- **`os_image_hash`** - SHA256 of Dstack image's `sha256sum.txt`
+- **`app_compose`** - Expected application configuration
+
+Missing any field will cause a configuration error.
+
+### Computing measurements
+
+Bootchain measurements depend on hardware configuration:
+- CPU count
+- Memory size
+- PCI hole size
+- Number of GPUs
+- Number of NVSwitches
+- Hotplug configuration
+- QEMU version
+
+You must compute measurements for your specific deployment using the `dstack-mr` tool. See the Dstack documentation for detailed instructions.
+
+### Development vs production
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy};
+
+// Development: Relaxed verification (DO NOT USE IN PRODUCTION)
+let dev_policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+// Production: Full verification required
+let prod_policy = Policy::DstackTdx(DstackTdxPolicy {
+    expected_bootchain: Some(/* ... */),
+    os_image_hash: Some(/* ... */),
+    app_compose: Some(/* ... */),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    // disable_runtime_verification: false (default)
+    ..Default::default()
+});
+```
+
+## Operational security
+
+### Secret management
+
+<Warning>
+Never commit secrets to version control, log EKM values, or expose private keys in error messages.
+</Warning>
+
+**Do not log:**
+- Exported Keying Material (EKM)
+- Private keys
+- Full quote/certificate blobs (only log hashes)
+- TLS session secrets
+
+### Monitoring and alerting
+
+Monitor for:
+- Failed attestation attempts
+- Rejected connections (allowlist violations)
+- TCB status changes
+- Certificate expiration
+- Unusual connection patterns
+
+### Defense in depth
+
+Atlas provides multiple layers of security:
+
+1. **Network layer** - Firewall rules, allowlist enforcement
+2. **TLS layer** - End-to-end encryption, certificate validation
+3. **Attestation layer** - Quote verification, bootchain validation
+4. **Session layer** - EKM binding, nonce freshness
+5. **Application layer** - App compose verification, OS image validation
+
+All layers work together to provide comprehensive protection.
+
+## See also
+
+- [Production checklist](/deployment/production-checklist) - Deployment requirements and guidelines
+- [Proxy setup](/deployment/proxy-setup) - WebSocket proxy configuration

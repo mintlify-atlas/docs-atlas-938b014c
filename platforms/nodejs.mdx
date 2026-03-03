@@ -1,0 +1,250 @@
+---
+title: Node.js
+description: Connect to TEEs from Node.js applications using attested TLS
+---
+
+Connect to Trusted Execution Environments (TEEs) from Node.js using attested TLS. The Node.js bindings provide a fetch-compatible API with automatic attestation verification.
+
+## Installation
+
+<Steps>
+  <Step title="Install the package">
+    ```bash
+    npm install @concrete-security/atlas-node
+    ```
+
+    Prebuilt binaries are included for macOS (x64, arm64), Linux (x64, arm64), and Windows (x64, arm64).
+  </Step>
+
+  <Step title="Import and use">
+    ```typescript
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+    const fetch = createAtlsFetch("enclave.example.com")
+    const response = await fetch("/api/secure-data")
+
+    console.log(response.attestation.trusted)  // true
+    console.log(response.attestation.teeType)  // "tdx"
+    ```
+  </Step>
+</Steps>
+
+## Usage patterns
+
+<Tabs>
+  <Tab title="Fetch API">
+    The `createAtlsFetch` function returns a fetch-compatible function with attestation support:
+
+    ```typescript
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+    const fetch = createAtlsFetch({
+      target: "enclave.example.com",
+      onAttestation: (attestation) => {
+        if (!attestation.trusted) {
+          throw new Error("Attestation failed!")
+        }
+        console.log("TEE:", attestation.teeType)
+        console.log("TCB:", attestation.tcbStatus)
+      }
+    })
+
+    const response = await fetch("/api/data")
+    const data = await response.json()
+    ```
+
+    The response includes an `attestation` property:
+
+    ```typescript
+    interface AtlsAttestation {
+      trusted: boolean
+      teeType: string          // "tdx", "sgx"
+      measurement: string | null
+      tcbStatus: string        // "UpToDate", "SWHardeningNeeded", etc.
+      advisoryIds: string[]
+    }
+    ```
+  </Tab>
+
+  <Tab title="AI SDK integration">
+    Connect to LLM inference servers running in TEEs (vLLM, etc.):
+
+    ```typescript
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
+    import { createOpenAI } from "@ai-sdk/openai"
+    import { streamText } from "ai"
+
+    const fetch = createAtlsFetch({
+      target: "enclave.example.com",
+      onAttestation: (att) => console.log(`TEE verified: ${att.teeType}`)
+    })
+
+    const openai = createOpenAI({
+      baseURL: "https://enclave.example.com/v1",
+      apiKey: process.env.OPENAI_API_KEY,
+      fetch
+    })
+
+    // Use .chat() for OpenAI-compatible servers (vLLM, etc.)
+    const { textStream } = await streamText({
+      model: openai.chat("your-model"),
+      messages: [{ role: "user", content: "Hello from a verified TEE!" }]
+    })
+
+    for await (const chunk of textStream) {
+      process.stdout.write(chunk)
+    }
+    ```
+
+    <Note>
+      Use `openai.chat(model)` instead of `openai(model)` for OpenAI-compatible servers. AI SDK v5's default uses the Responses API which most servers don't support yet.
+    </Note>
+  </Tab>
+
+  <Tab title="HTTPS agent">
+    For use with `https.request`, axios, or other HTTP clients:
+
+    ```typescript
+    import { createAtlsAgent } from "@concrete-security/atlas-node"
+    import https from "https"
+
+    const agent = createAtlsAgent({
+      target: "enclave.example.com",
+      onAttestation: (att) => console.log("Verified:", att.teeType)
+    })
+
+    // Use with https.request
+    https.get("https://enclave.example.com/api", { agent }, (res) => {
+      // res.socket.atlsAttestation contains attestation data
+    })
+
+    // Use with axios
+    import axios from "axios"
+    const client = axios.create({ httpsAgent: agent })
+    ```
+  </Tab>
+</Tabs>
+
+## API reference
+
+### createAtlsFetch(target)
+
+Create an attested fetch function with a simple target string:
+
+```typescript
+const fetch = createAtlsFetch("enclave.example.com")
+// or with port
+const fetch = createAtlsFetch("enclave.example.com:8443")
+```
+
+### createAtlsFetch(options)
+
+Create with full configuration:
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",      // Required: host with optional port
+  serverName: "enclave.example.com",  // Optional: SNI override
+  headers: { "X-Custom": "value" },   // Optional: default headers
+  onAttestation: (attestation) => {   // Optional: attestation callback
+    if (!attestation.trusted) {
+      throw new Error("Attestation failed!")
+    }
+    console.log("TEE:", attestation.teeType)
+    console.log("TCB:", attestation.tcbStatus)
+  }
+})
+```
+
+### createAtlsAgent(options)
+
+For use with `https.request`, axios, or other HTTP clients:
+
+```typescript
+import { createAtlsAgent } from "@concrete-security/atlas-node"
+import https from "https"
+
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  onAttestation: (att) => console.log("Verified:", att.teeType)
+})
+
+https.get("https://enclave.example.com/api", { agent }, (res) => {
+  // res.socket.atlsAttestation contains attestation data
+})
+```
+
+### closeAllSockets()
+
+Close all open aTLS connections. Use for graceful shutdown in long-running processes:
+
+```typescript
+import { closeAllSockets } from "@concrete-security/atlas-node/binding"
+
+// Before process exit
+await closeAllSockets()
+process.exit(0)
+```
+
+Recommended for:
+- Server processes with graceful shutdown handlers
+- Test suites that need clean teardown
+- CLI tools that need clean exit
+
+## Policy configuration
+
+Policies control attestation verification requirements. Pass a policy object to `createAtlsFetch` or `createAtlsAgent`:
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"],
+    expected_bootchain: {
+      mrtd: "b24d3b24...",
+      rtmr0: "24c15e08...",
+      rtmr1: "6e1afb74...",
+      rtmr2: "89e73ced..."
+    },
+    os_image_hash: "86b18137...",
+    app_compose: {
+      runner: "docker-compose",
+      docker_compose_file: "..."
+    }
+  }
+})
+```
+
+See [Policy Configuration](/core-concepts/policies) for complete field descriptions and [Bootchain Verification](/guides/bootchain-verification) for computing measurements.
+
+## How it works
+
+Node.js bindings connect directly to TEE endpoints via TCP (no proxy required):
+
+1. **TLS handshake** - Establishes TLS 1.3 with session binding via EKM
+2. **Quote retrieval** - Fetches attestation quote from the server
+3. **Verification** - Validates quote against policy using Intel DCAP
+4. **Request execution** - Proceeds with HTTP request over verified channel
+
+All verification happens automatically. The attestation result is exposed on every response for audit logging or policy enforcement.
+
+See [Protocol Specification](/core-concepts/protocol) for detailed protocol flow and security features.
+
+## TypeScript support
+
+Full TypeScript definitions are included:
+
+```typescript
+import { 
+  createAtlsFetch, 
+  AtlsFetch, 
+  AtlsAttestation, 
+  AtlsResponse 
+} from "@concrete-security/atlas-node"
+
+const fetch: AtlsFetch = createAtlsFetch("enclave.example.com")
+
+const response: AtlsResponse = await fetch("/api")
+const attestation: AtlsAttestation = response.attestation
+```

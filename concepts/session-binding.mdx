@@ -1,0 +1,124 @@
+---
+title: Session binding
+description: EKM session binding prevents attestation relay attacks by binding each attestation to its specific TLS connection
+---
+
+## What is session binding
+
+Session binding cryptographically ties an attestation report to a specific TLS connection. This prevents relay attacks where an attacker with a compromised private key could reuse attestations from a genuine TEE across different TLS sessions.
+
+<Note>
+  Session binding is always enabled in Atlas and requires no configuration. It works automatically with all aTLS connections.
+</Note>
+
+## How it prevents relay attacks
+
+Consider this attack scenario without session binding:
+
+1. Attacker compromises the TLS private key
+2. Attacker establishes a TLS connection with a client
+3. Attacker requests a quote from a genuine TEE over a separate connection
+4. Attacker relays that quote to the client
+5. Client accepts the quote (it's validly signed) and sends sensitive data
+6. Attacker intercepts the data
+
+Session binding prevents this attack by ensuring each quote can only be used for the TLS session that requested it.
+
+## EKM session binding (RFC 9266)
+
+Atlas implements session binding using Exported Keying Material (EKM) as specified in:
+
+- [RFC 5705](https://datatracker.ietf.org/doc/html/rfc5705) - Keying Material Exporters for TLS
+- [RFC 8446 Section 7.5](https://datatracker.ietf.org/doc/html/rfc8446#section-7.5) - Exporters (TLS 1.3)
+- [RFC 9266](https://datatracker.ietf.org/doc/html/rfc9266) - Channel Bindings for TLS 1.3
+
+### How EKM works
+
+After the TLS handshake completes, both client and server can derive keying material using the TLS exporter interface:
+
+```rust
+session_ekm = export_keying_material(
+    32,                            // length in bytes
+    "EXPORTER-Channel-Binding",    // label
+    None                           // context
+)
+```
+
+The exported keying material has these properties:
+
+- **Session-specific** - Derived from the TLS master secret, unique per connection
+- **Deterministic** - Both peers compute the same value
+- **Unforgeable** - Cannot be computed without the TLS master secret
+- **Collision-resistant** - Different sessions produce different EKM values
+
+## Session binding protocol
+
+Atlas binds attestations to TLS sessions using this protocol:
+
+### 1. TLS handshake completes
+
+Both client and server have established a TLS 1.3 connection.
+
+### 2. Client generates nonce and computes report data
+
+The client:
+
+1. Extracts the session EKM: `session_ekm = export_keying_material(32, "EXPORTER-Channel-Binding", None)`
+2. Generates a random 32-byte nonce for freshness
+3. Computes `report_data = SHA512(nonce || session_ekm)`
+4. Sends the nonce to the server
+
+### 3. Server computes report data and generates quote
+
+The server:
+
+1. Extracts its session EKM (identical to the client's)
+2. Receives the nonce from the client
+3. Computes `report_data = SHA512(nonce || server_ekm)`
+4. Requests a TDX quote with this report data
+5. Returns the quote to the client
+
+### 4. Client verifies session binding
+
+The client:
+
+1. Receives the quote from the server
+2. Extracts the `report_data` field from the quote
+3. Verifies that `quote.report_data == SHA512(nonce || session_ekm)`
+
+If verification succeeds, the client has proof that:
+
+- The quote was generated during this specific TLS session
+- The TEE has access to the TLS master secret (owns the private key)
+- The attestation cannot be replayed on a different connection
+
+<Info>
+  The nonce adds freshness to ensure the quote was generated in response to this specific request, not pre-computed.
+</Info>
+
+## Defense in depth
+
+Session binding provides protection even if:
+
+- The TLS private key is compromised
+- An attacker has network access to a genuine TEE
+- The attacker can intercept and relay network traffic
+
+Because the EKM is derived from the TLS master secret (which is negotiated fresh for each connection), an attacker cannot:
+
+- Compute the correct EKM for their malicious connection
+- Relay a quote from a different connection (the report data won't match)
+- Pre-generate quotes (the nonce ensures freshness)
+
+## Key properties
+
+Atlas session binding guarantees:
+
+- **Always enabled** - No configuration needed, works automatically
+- **Transparent** - No impact on application code
+- **Standards-based** - Uses RFC 9266 channel binding for TLS 1.3
+- **Attack-resistant** - Prevents relay, replay, and key compromise attacks
+
+<Note>
+  Session binding is part of the core aTLS protocol and cannot be disabled. Every quote verification includes session binding checks.
+</Note>

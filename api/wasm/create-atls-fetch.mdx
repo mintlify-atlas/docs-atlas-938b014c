@@ -1,0 +1,151 @@
+---
+title: createAtlsFetch
+description: Fetch-compatible API for attested TLS connections from browsers
+---
+
+## Overview
+
+The `createAtlsFetch` function creates a fetch-compatible API for making HTTP requests over attested TLS connections. It handles the full HTTP protocol in Rust/WASM, providing a familiar interface for browser applications.
+
+This is the recommended high-level API for most browser use cases.
+
+## Function signature
+
+```typescript
+async function createAtlsFetch(options: AtlsFetchOptions): Promise<AtlsFetch>
+```
+
+## Parameters
+
+<ParamField path="options" type="object" required>
+  Configuration for the attested fetch connection
+
+  <ParamField path="proxyUrl" type="string" required>
+    WebSocket proxy URL for TCP tunneling. Required because browsers cannot make raw TCP connections.
+
+    Example: `"ws://127.0.0.1:9000"`
+  </ParamField>
+
+  <ParamField path="targetHost" type="string" required>
+    The TEE server hostname to connect to.
+
+    Example: `"vllm.example.com"`
+  </ParamField>
+
+  <ParamField path="policy" type="Policy" required>
+    Attestation verification policy that determines what TEE evidence is accepted.
+
+    See [Policy configuration](/core-concepts/policy) for details.
+  </ParamField>
+
+  <ParamField path="onAttestation" type="function" default="undefined">
+    Optional callback invoked after attestation verification completes.
+
+    Receives an `AttestationSummary` object with:
+    - `trusted` (boolean): Verification result
+    - `teeType` (string): TEE type (e.g., "Tdx")
+    - `tcbStatus` (string): TCB status from Intel
+    - `advisoryIds` (string[]): Security advisories
+  </ParamField>
+</ParamField>
+
+## Return value
+
+<ResponseField name="fetch" type="function">
+  A fetch-compatible function for making HTTP requests over the attested TLS connection.
+
+  The returned function has the same signature as the standard `fetch` API:
+  ```typescript
+  (url: string, init?: RequestInit) => Promise<Response>
+  ```
+
+  The `Response` object includes an additional `attestation` property with the verification result.
+</ResponseField>
+
+## Proxy configuration
+
+Browser deployments require a WebSocket-to-TCP proxy since browsers cannot make raw TCP connections. The proxy forwards bytes without TLS termination - all encryption and attestation verification happens in the browser.
+
+### Running the proxy
+
+```bash
+# Set allowlist for security (prevents SSRF attacks)
+export ATLS_PROXY_ALLOWLIST="vllm.example.com:443,other.tee.com:443"
+export ATLS_PROXY_LISTEN="127.0.0.1:9000"
+
+cargo run -p atlas-proxy
+```
+
+### Security considerations
+
+- The proxy only forwards bytes and never terminates TLS
+- Attestation verification occurs entirely in the browser
+- An allowlist is required to prevent SSRF attacks
+- The proxy can be deployed alongside your web application
+
+## Examples
+
+### Basic usage
+
+```javascript
+import { init, createAtlsFetch } from "@concrete-security/atlas-wasm";
+
+await init();
+
+const fetch = createAtlsFetch({
+  proxyUrl: "ws://127.0.0.1:9000",
+  targetHost: "vllm.example.com",
+  policy: { type: "dstack_tdx" },
+  onAttestation: (att) => console.log("TEE:", att.teeType)
+});
+
+const response = await fetch("/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ model: "gpt", messages: [...] })
+});
+
+console.log(response.status);
+console.log(response.attestation); // { trusted: true, teeType: "Tdx", ... }
+```
+
+### With policy configuration
+
+```javascript
+const fetch = createAtlsFetch({
+  proxyUrl: "ws://127.0.0.1:9000",
+  targetHost: "vllm.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate", "SWHardeningNeeded"],
+    expected_bootchain: {
+      mrtd: "b24d3b24...",
+      rtmr0: "24c15e08...",
+      rtmr1: "6e1afb74...",
+      rtmr2: "89e73ced..."
+    }
+  }
+});
+```
+
+### Streaming responses
+
+```javascript
+const response = await fetch("/v1/chat/completions", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ 
+    model: "gpt", 
+    messages: [...],
+    stream: true 
+  })
+});
+
+// Response body is a ReadableStream
+const reader = response.body.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  console.log(new TextDecoder().decode(value));
+}
+```

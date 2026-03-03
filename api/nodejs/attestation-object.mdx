@@ -1,0 +1,236 @@
+---
+title: Attestation object
+description: Structure and fields of the attestation data
+---
+
+The attestation object contains verified TEE attestation data. It is available on every response from `createAtlsFetch` and on sockets created by `createAtlsAgent`.
+
+## Structure
+
+```typescript
+interface AtlsAttestation {
+  trusted: boolean
+  teeType: string
+  measurement: string | null
+  tcbStatus: string
+  advisoryIds: string[]
+}
+```
+
+## Fields
+
+<ResponseField name="trusted" type="boolean">
+  Whether attestation verification succeeded. If `false`, the connection should not be trusted.
+</ResponseField>
+
+<ResponseField name="teeType" type="string">
+  TEE type identifier:
+  - `"tdx"` - Intel TDX (Trust Domain Extensions)
+  - `"sgx"` - Intel SGX (Software Guard Extensions) (future support)
+</ResponseField>
+
+<ResponseField name="measurement" type="string | null">
+  Workload measurement hash:
+  - For TDX: MRTD (Measurement Register for Trust Domain)
+  - For SGX: MRENCLAVE (future support)
+  - `null` if measurement is not available
+</ResponseField>
+
+<ResponseField name="tcbStatus" type="string">
+  Platform security status. Common values:
+  - `"UpToDate"` - Platform is fully patched (recommended for production)
+  - `"SWHardeningNeeded"` - Platform requires software mitigations
+  - `"ConfigurationNeeded"` - BIOS/hardware configuration issue
+  - `"OutOfDate"` - Platform TCB level is outdated
+  - `"Revoked"` - Platform or keys have been compromised (never use)
+  
+  See [TCB Status Values](/policy/tcb-status) for detailed descriptions and production recommendations.
+</ResponseField>
+
+<ResponseField name="advisoryIds" type="string[]">
+  List of applicable Intel security advisory IDs. Empty array if no advisories apply.
+</ResponseField>
+
+## Accessing attestation data
+
+### With createAtlsFetch
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+const fetch = createAtlsFetch({ target, policy })
+const response = await fetch("/api/data")
+
+// Access attestation on response
+const attestation = response.attestation
+
+console.log(attestation.trusted)      // true
+console.log(attestation.teeType)      // "tdx"
+console.log(attestation.measurement)  // "b24d3b24e9e3c16012376b52362ca098..."
+console.log(attestation.tcbStatus)    // "UpToDate"
+console.log(attestation.advisoryIds)  // []
+```
+
+### With createAtlsAgent
+
+```typescript
+import { createAtlsAgent } from "@concrete-security/atlas-node"
+import https from "https"
+
+const agent = createAtlsAgent({ target, policy })
+
+https.get("https://enclave.example.com/api/data", { agent }, (res) => {
+  // Access attestation on socket
+  const attestation = res.socket.atlsAttestation
+  
+  console.log(attestation.trusted)      // true
+  console.log(attestation.teeType)      // "tdx"
+  console.log(attestation.tcbStatus)    // "UpToDate"
+})
+```
+
+### With attestation callback
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (attestation) => {
+    // Log attestation for audit trail
+    console.log(JSON.stringify({
+      timestamp: new Date().toISOString(),
+      teeType: attestation.teeType,
+      measurement: attestation.measurement,
+      tcbStatus: attestation.tcbStatus,
+      advisoryIds: attestation.advisoryIds,
+      trusted: attestation.trusted
+    }))
+  }
+})
+```
+
+## Usage examples
+
+### Verify attestation succeeded
+
+```typescript
+const response = await fetch("/api/data")
+
+if (!response.attestation.trusted) {
+  throw new Error("Attestation verification failed")
+}
+
+const data = await response.json()
+```
+
+### Check TCB status
+
+```typescript
+const response = await fetch("/api/data")
+const { tcbStatus } = response.attestation
+
+if (tcbStatus === "UpToDate") {
+  console.log("Platform is fully patched")
+} else if (tcbStatus === "SWHardeningNeeded") {
+  console.warn("Platform requires software mitigations")
+} else if (tcbStatus === "OutOfDate") {
+  console.error("Platform TCB is outdated")
+} else if (tcbStatus === "Revoked") {
+  throw new Error("Platform has been revoked - DO NOT USE")
+}
+```
+
+### Verify measurement matches expected value
+
+```typescript
+const expectedMeasurement = "b24d3b24e9e3c16012376b52362ca098..."
+
+const response = await fetch("/api/data")
+const { measurement } = response.attestation
+
+if (measurement !== expectedMeasurement) {
+  throw new Error(`Measurement mismatch: expected ${expectedMeasurement}, got ${measurement}`)
+}
+```
+
+### Check for security advisories
+
+```typescript
+const response = await fetch("/api/data")
+const { advisoryIds } = response.attestation
+
+if (advisoryIds.length > 0) {
+  console.warn(`Active security advisories: ${advisoryIds.join(", ")}")
+  // Decide whether to proceed based on your security policy
+}
+```
+
+### Audit logging
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+import { writeFileSync, appendFileSync } from "fs"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: productionPolicy,
+  onAttestation: (attestation) => {
+    const logEntry = {
+      timestamp: new Date().toISOString(),
+      teeType: attestation.teeType,
+      measurement: attestation.measurement,
+      tcbStatus: attestation.tcbStatus,
+      advisoryIds: attestation.advisoryIds,
+      trusted: attestation.trusted
+    }
+    
+    appendFileSync(
+      "attestation-audit.log",
+      JSON.stringify(logEntry) + "\n"
+    )
+  }
+})
+```
+
+### Conditional policy enforcement
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: basePolicy,
+  onAttestation: (attestation) => {
+    // Enforce stricter requirements for production
+    if (process.env.NODE_ENV === "production") {
+      if (attestation.tcbStatus !== "UpToDate") {
+        throw new Error(`Production requires UpToDate TCB, got ${attestation.tcbStatus}`)
+      }
+      
+      if (attestation.advisoryIds.length > 0) {
+        throw new Error(`Production cannot have active advisories: ${attestation.advisoryIds}`)
+      }
+    }
+  }
+})
+```
+
+## TypeScript types
+
+Full TypeScript definitions are included:
+
+```typescript
+import type { AtlsAttestation } from "@concrete-security/atlas-node"
+
+function logAttestation(attestation: AtlsAttestation): void {
+  console.log(`TEE Type: ${attestation.teeType}`)
+  console.log(`Measurement: ${attestation.measurement}`)
+  console.log(`TCB Status: ${attestation.tcbStatus}`)
+  console.log(`Trusted: ${attestation.trusted}`)
+}
+```
+
+## Related
+
+- [createAtlsFetch](/api/nodejs/create-atls-fetch) - Fetch-compatible API with attestation
+- [createAtlsAgent](/api/nodejs/create-atls-agent) - https.Agent with attestation
+- [TCB Status](/policy/tcb-status) - Detailed TCB status descriptions and recommendations
+- [TypeScript types](/api/nodejs/typescript-types) - Complete type definitions

@@ -1,0 +1,206 @@
+---
+title: TCB status values
+description: Understanding Trusted Computing Base security levels and production recommendations
+---
+
+TCB (Trusted Computing Base) status indicates the security posture of the TEE platform. Intel's DCAP attestation service returns a TCB status value that reflects whether the platform's firmware, microcode, and configuration are up-to-date with the latest security patches.
+
+## Status values
+
+These values are defined by Intel's DCAP specification:
+
+| Status | Meaning | Production use |
+|--------|---------|----------------|
+| `UpToDate` | Platform is fully patched with the latest TCB level released by Intel | ✅ Always use - this is the recommended production setting |
+| `SWHardeningNeeded` | The platform is up-to-date, but the software (TD/Enclave) requires specific hardening mitigations | ⚠️ Use only if you have verified that your software stack implements the necessary code-level mitigations to operate safely on this hardware |
+| `ConfigurationNeeded` | The platform is patched, but the BIOS/hardware configuration does not meet the recommended security baseline | ⚠️ Use only if your specific threat model tolerates the configuration risk |
+| `OutOfDate` | Platform TCB level is lower than the latest version released by Intel | ⚠️ Use only if combined with a grace period to allow operations to continue temporarily during patch cycles |
+| `Revoked` | The processor or signing keys have been compromised and explicitly invalidated by Intel | ❌ Never use - platform is considered compromised |
+
+<Warning>
+  Never accept `Revoked` status in production. Revoked platforms have known critical security vulnerabilities or compromised signing keys.
+</Warning>
+
+## Configuring allowed TCB statuses
+
+Specify which TCB statuses to accept in your policy:
+
+<CodeGroup>
+```rust Rust
+use atlas_rs::{Policy, DstackTdxPolicy};
+
+// Strict production - UpToDate only
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into()],
+    ..Default::default()
+});
+
+// Development - multiple statuses
+let dev_policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec![
+        "UpToDate".into(),
+        "SWHardeningNeeded".into(),
+        "OutOfDate".into(),
+    ],
+    ..Default::default()
+});
+```
+
+```json JSON
+{
+  "type": "dstack_tdx",
+  "allowed_tcb_status": ["UpToDate"]
+}
+```
+</CodeGroup>
+
+## Grace periods for OutOfDate platforms
+
+Grace periods allow `OutOfDate` platforms to operate for a limited time after a new TCB level is released. This accommodates patch deployment cycles while maintaining security.
+
+### How grace periods work
+
+1. Intel releases a new TCB level with security patches
+2. Previously `UpToDate` platforms become `OutOfDate`
+3. If a grace period is configured, platforms are accepted if: `tcb_date + grace_period >= current_time`
+4. After the grace period expires, attestation fails
+
+### Example with 30-day grace period
+
+<CodeGroup>
+```rust Rust
+use atlas_rs::{Policy, DstackTdxPolicy};
+
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into(), "OutOfDate".into()],
+    grace_period: Some(30 * 24 * 60 * 60), // 30 days in seconds
+    ..Default::default()
+});
+```
+
+```json JSON
+{
+  "type": "dstack_tdx",
+  "allowed_tcb_status": ["UpToDate", "OutOfDate"],
+  "grace_period": 2592000
+}
+```
+</CodeGroup>
+
+<Warning>
+  Grace periods must include `OutOfDate` in `allowed_tcb_status`. Configuration will fail if you specify a grace period without accepting `OutOfDate` status.
+</Warning>
+
+### Grace period best practices
+
+- **Keep it short** - 30 days or less is recommended
+- **Monitor actively** - Track when platforms become `OutOfDate` and update them promptly
+- **Zero grace for critical services** - High-security applications should use `grace_period: 0` or omit it entirely
+- **Coordinate with patching** - Align grace periods with your infrastructure patch deployment schedule
+
+### No grace period (immediate enforcement)
+
+Set `grace_period` to `0` to require immediate patching:
+
+<CodeGroup>
+```rust Rust
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into(), "OutOfDate".into()],
+    grace_period: Some(0), // No grace window
+    ..Default::default()
+});
+```
+
+```json JSON
+{
+  "type": "dstack_tdx",
+  "allowed_tcb_status": ["UpToDate", "OutOfDate"],
+  "grace_period": 0
+}
+```
+</CodeGroup>
+
+With `grace_period: 0`, only `UpToDate` platforms are accepted in practice, even though `OutOfDate` is in the allowed list.
+
+## Production recommendations
+
+### High security environments
+
+For production systems handling sensitive data:
+
+```rust
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into()],
+    // No grace period - immediate enforcement
+    ..Default::default()
+});
+```
+
+This configuration:
+- Only accepts fully patched platforms
+- Rejects any platform with known vulnerabilities
+- Provides the strongest security guarantees
+
+### Balanced production environments
+
+For systems that need operational flexibility during patch cycles:
+
+```rust
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    allowed_tcb_status: vec!["UpToDate".into(), "OutOfDate".into()],
+    grace_period: Some(14 * 24 * 60 * 60), // 14 days
+    ..Default::default()
+});
+```
+
+This configuration:
+- Accepts `UpToDate` platforms immediately
+- Gives a 14-day window for patching `OutOfDate` platforms
+- Balances security with operational requirements
+
+### Development and testing
+
+For non-production environments:
+
+```rust
+let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+// Equivalent to:
+// allowed_tcb_status: ["UpToDate", "SWHardeningNeeded", "OutOfDate"]
+```
+
+This configuration:
+- Accepts multiple TCB statuses
+- Disables runtime verification
+- Should never be used in production
+
+## Error handling
+
+When a platform's TCB status is not allowed, verification fails with a specific error:
+
+```rust
+use atlas_rs::{atls_connect, AtlsVerificationError};
+
+match atls_connect(tcp, hostname, policy, None).await {
+    Err(AtlsVerificationError::TcbStatusNotAllowed { status, allowed }) => {
+        eprintln!("Platform TCB status '{}' not in allowed list: {:?}", status, allowed);
+    }
+    Err(e) => eprintln!("Other error: {}", e),
+    Ok((stream, report)) => println!("Verification succeeded"),
+}
+```
+
+## References
+
+- [Intel DCAP Appraisal Engine Developer Guide](https://download.01.org/intel-sgx/latest/dcap-latest/linux/docs/Intel_DCAP_Appraisal_Engine_Developer_Guide_for_Linux.pdf)
+- [Understanding TDX Attestation Reports](https://phala.com/posts/understanding-tdx-attestation-reports-a-developers-guide)
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="DstackTdx policy" icon="shield-check" href="/policy/dstack-tdx">
+    Configure Intel TDX attestation
+  </Card>
+  <Card title="Computing measurements" icon="calculator" href="/policy/computing-measurements">
+    Generate bootchain measurements
+  </Card>
+</CardGroup>

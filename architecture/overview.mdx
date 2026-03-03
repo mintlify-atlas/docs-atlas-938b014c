@@ -1,0 +1,218 @@
+---
+title: Architecture overview
+description: Core design, abstractions, and module structure of Atlas
+---
+
+Atlas provides a modular, extensible architecture for attested TLS verification. The design emphasizes trait-based abstractions, type-safe polymorphism, and platform portability.
+
+## Design philosophy
+
+Atlas follows four core principles:
+
+1. **Trait-based abstractions** - `AtlsVerifier` and `IntoVerifier` traits enable extensibility without modifying core logic
+2. **Enum-based polymorphism** - `Policy`, `Verifier`, and `Report` enums provide type-safe runtime dispatch
+3. **Policy-driven configuration** - JSON-serializable policies make configuration flexible and portable
+4. **Platform abstraction** - Conditional compilation supports both native (tokio) and WASM (futures) targets
+
+## High-level architecture
+
+The architecture flows from user-facing API through policy configuration to TEE-specific verification:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                       High-Level API                            │
+│    atls_connect(stream, server_name, policy, alpn)            │
+│                                                                 │
+│    1. TLS handshake with CA verification                       │
+│    2. Capture peer certificate                                  │
+│    3. Convert policy to verifier                                │
+│    4. Run attestation verification                              │
+│    5. Return (TlsStream, Report)                                │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          Policy                                 │
+│  ┌───────────────┐                                             │
+│  │  DstackTdx    │─────▶ into_verifier() ─────▶ Verifier       │
+│  │  (+ future)   │                                             │
+│  └───────────────┘                                             │
+│                                                                 │
+│  Serializable with serde - load from JSON config files         │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                         Verifier                                │
+│  ┌─────────────────────┐                                       │
+│  │ DstackTDXVerifier   │─────▶ verify(stream, cert, hostname)  │
+│  │ (+ future verifiers)│                                       │
+│  └─────────────────────┘                                       │
+│                                                                 │
+│  Implements AtlsVerifier trait                                 │
+│  Performs TEE-specific attestation verification                 │
+└─────────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          Report                                 │
+│  ┌───────────────┐                                             │
+│  │ Tdx(...)      │  ← Contains dcap_qvl::VerifiedReport        │
+│  │ (+ future)    │                                             │
+│  └───────────────┘                                             │
+│                                                                 │
+│  Unified return type preserving TEE-specific details           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Core abstractions
+
+### AtlsVerifier trait
+
+The core interface for attestation verification:
+
+```rust
+pub trait AtlsVerifier: Send + Sync {
+    fn verify<S>(
+        &self,
+        stream: &mut S,       // TLS stream for quote fetching
+        peer_cert: &[u8],     // Server's TLS certificate (DER)
+        session_ekm: &[u8],   // TLS session EKM for binding
+        hostname: &str,       // Server hostname
+    ) -> impl Future<Output = Result<Report, AtlsVerificationError>> + Send
+    where
+        S: AsyncByteStream;
+}
+```
+
+Implementors provide TEE-specific logic for:
+- Fetching attestation evidence from the server
+- Verifying cryptographic proofs (quotes)
+- Validating certificate and session bindings
+- Checking measurements against policy
+
+### IntoVerifier trait
+
+Converts configuration/policy types into concrete verifiers:
+
+```rust
+pub trait IntoVerifier {
+    type Verifier: AtlsVerifier;
+    fn into_verifier(self) -> Result<Self::Verifier, AtlsVerificationError>;
+}
+```
+
+This enables policy-driven configuration where users specify verification parameters in JSON, and the implementation constructs the appropriate verifier.
+
+### Policy enum
+
+Top-level configuration that selects and configures a verifier:
+
+```rust
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Policy {
+    #[serde(rename = "dstack_tdx")]
+    DstackTdx(DstackTdxPolicy),
+    // Future: Sgx(SgxPolicy), Sev(SevPolicy), etc.
+}
+```
+
+<Note>
+The `#[serde(tag = "type")]` attribute enables JSON configurations like `{"type": "dstack_tdx", ...}` to be automatically deserialized to the correct variant.
+</Note>
+
+### Verifier enum
+
+Wraps all concrete verifier implementations for type-safe polymorphism:
+
+```rust
+pub enum Verifier {
+    DstackTdx(DstackTDXVerifier),
+    // Future: Sgx(SgxVerifier), Sev(SevVerifier), etc.
+}
+```
+
+The `Verifier` enum implements `AtlsVerifier` by delegating to the wrapped implementation, enabling `atls_connect()` to work with any verifier type.
+
+### Report enum
+
+Unified return type containing TEE-specific attestation data:
+
+```rust
+pub enum Report {
+    Tdx(VerifiedReport),
+    // Future: Sgx(SgxReport), Sev(SevReport), etc.
+}
+```
+
+Users can match on the variant to access TEE-specific details:
+
+```rust
+match report {
+    Report::Tdx(tdx_report) => {
+        println!("TCB Status: {}", tdx_report.status);
+        // Access TDX-specific fields
+    }
+}
+```
+
+## Module structure
+
+```
+core/src/
+├── lib.rs              # Public API re-exports
+├── connect.rs          # atls_connect(), tls_handshake()
+├── verifier.rs         # AtlsVerifier trait, Report/Verifier enums
+├── policy.rs           # Policy enum
+├── error.rs            # AtlsVerificationError
+│
+├── dstack/             # DStack TDX implementation
+│   ├── mod.rs          # Re-exports
+│   ├── verifier.rs     # DstackTDXVerifier (AtlsVerifier impl)
+│   ├── config.rs       # DstackTDXVerifierConfig, Builder
+│   ├── policy.rs       # DstackTdxPolicy (IntoVerifier impl)
+│   └── compose_hash.rs # Deterministic app config hashing
+│
+└── tdx/                # Generic TDX types (shared across TDX verifiers)
+    ├── mod.rs          # Re-exports
+    └── config.rs       # ExpectedBootchain, TCB_STATUS_LIST
+```
+
+## Platform support
+
+Atlas supports both native (Linux/macOS/Windows) and WASM targets through conditional compilation:
+
+| Aspect | Native | WASM |
+|--------|--------|------|
+| Async runtime | tokio | futures |
+| I/O traits | `tokio::io::{AsyncRead, AsyncWrite}` | `futures::io::{AsyncRead, AsyncWrite}` |
+| Send bounds | Required (`Send + Sync`) | Not required (single-threaded) |
+| Time source | `std::time::SystemTime` | `js_sys::Date` |
+| RNG | `rand::thread_rng()` | `rand::thread_rng()` (wasm-compatible) |
+
+### Conditional compilation pattern
+
+```rust
+// Trait definition with platform-specific bounds
+#[cfg(not(target_arch = "wasm32"))]
+pub trait AtlsVerifier: Send + Sync {
+    fn verify<S>(...) -> impl Future<...> + Send
+    where S: AsyncByteStream;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait AtlsVerifier: Sync {
+    fn verify<S>(...) -> impl Future<...>  // No Send bound
+    where S: AsyncByteStream;
+}
+```
+
+<Note>
+When implementing new verifiers, provide both native and WASM implementations. The logic is typically identical; only the trait bounds differ.
+</Note>
+
+## See also
+
+- [Verification flow](/architecture/verification-flow) - Complete step-by-step verification process
+- [Extending Atlas](/architecture/extending-atls) - Add new TEE verifiers

@@ -1,0 +1,102 @@
+---
+title: aTLS protocol
+description: Attested TLS verifies that servers run inside Trusted Execution Environments before you send sensitive data
+---
+
+## What is aTLS
+
+Attested TLS (aTLS) is a protocol that enables clients to verify that a TLS server is running inside a Trusted Execution Environment (TEE) before sending sensitive data. It extends the standard TLS handshake with cryptographic attestation evidence that proves the server's execution environment.
+
+<Note>
+  aTLS does not replace TLS. It adds a verification layer after the TLS handshake to confirm the server is running in a TEE.
+</Note>
+
+## How it works
+
+The aTLS protocol follows a three-step verification flow:
+
+### Step 1: TLS handshake
+
+A standard TLS 1.3 handshake is performed with a promiscuous verifier. The server's certificate is accepted temporarily and recorded for later verification.
+
+### Step 2: EKM extraction and quote retrieval
+
+After the TLS handshake completes, both client and server extract a session-specific Exported Keying Material (EKM):
+
+```rust
+session_ekm = export_keying_material(32, "EXPORTER-Channel-Binding", None)
+```
+
+The client generates a 32-byte nonce for freshness and computes the expected report data:
+
+```rust
+nonce = random_bytes(32)
+report_data = SHA512(nonce || session_ekm)
+```
+
+The client sends an HTTP POST request over the established TLS channel:
+
+```http
+POST /tdx_quote HTTP/1.1
+Host: localhost
+Content-Type: application/json
+
+{
+  "nonce_hex": "<hex_nonce>"
+}
+```
+
+The server extracts its own session EKM, computes the same `report_data = SHA512(nonce || server_ekm)`, and generates a quote containing that report data.
+
+Server response:
+
+```json
+{
+  "success": true,
+  "quote": {
+    "quote": "<hex_tdx_quote>",
+    "event_log": ["..."]
+  }
+}
+```
+
+### Step 3: Verification
+
+The client performs comprehensive verification:
+
+1. **Quote signature validation** - Validate the quote signature using Intel PCCS collateral (DCAP verification flow)
+2. **Session binding** - Ensure `report_data` in the quote equals `SHA512(nonce || session_ekm)` to bind the attestation to this specific TLS session and ensure freshness
+3. **Event log replay** - Recompute RTMR3 by replaying every event log entry in order and verify the final digest matches the quote
+4. **Certificate binding** - Locate the TLS key binding event in the event log (contains the certificate public key hash) to prove the attested workload owns the negotiated TLS key
+5. **Measurement verification** - Verify bootchain (MRTD, RTMR0-2), application configuration hash, and OS image hash against policy
+
+## Why use aTLS
+
+aTLS provides several critical security guarantees:
+
+- **TEE verification** - Cryptographic proof that code is running in a hardware-protected enclave
+- **Session binding** - Attestations are bound to specific TLS connections, preventing relay attacks
+- **Measurement verification** - Confirm the exact code, configuration, and runtime environment
+- **Defense in depth** - Protection even if TLS private keys are compromised
+
+<Info>
+  Session binding via EKM is always enabled and requires no configuration. It works automatically with all aTLS connections.
+</Info>
+
+## TCB status values
+
+TCB (Trusted Computing Base) status indicates the security posture of the TEE platform:
+
+| Status | Meaning | Production use |
+|--------|---------|----------------|
+| `UpToDate` | Platform is fully patched | Always use |
+| `SWHardeningNeeded` | Platform is up-to-date, but the software requires specific hardening mitigations | Use if you have verified that your software stack implements the necessary code-level mitigations |
+| `ConfigurationNeeded` | Platform is patched, but the BIOS/hardware configuration does not meet the recommended security baseline | Use if your specific threat model tolerates the configuration risk |
+| `OutOfDate` | Platform TCB level is lower than the latest version released by Intel | Use only with a grace period to allow operations to continue temporarily during patch cycles |
+| `Revoked` | The processor or signing keys have been compromised and explicitly invalidated by Intel | Never use |
+
+Configure allowed statuses via `allowed_tcb_status` in your policy. For production, use `["UpToDate"]`. You can also apply a `grace_period` when you need a limited window for `OutOfDate` platforms.
+
+<Note>
+  For development and testing, `DstackTdxPolicy::dev()` allows more permissive TCB statuses but still performs TEE verification.
+</Note>

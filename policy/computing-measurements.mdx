@@ -1,0 +1,276 @@
+---
+title: Computing bootchain measurements
+description: Generate MRTD, RTMR0-2, and OS image hash for your Dstack deployment
+---
+
+Bootchain measurements (MRTD and RTMR0-2) are hardware-specific values that verify the TEE boot process. You must compute these measurements for your specific deployment configuration.
+
+## Why measurements are hardware-specific
+
+The same Dstack version produces different measurements on different hardware configurations. Measurements depend on:
+
+- **CPU count** - Number of vCPUs allocated to the VM
+- **Memory size** - Amount of RAM allocated
+- **PCI hole size** - PCI memory address space configuration
+- **Number of GPUs** - GPU passthrough configuration
+- **Number of NVSwitches** - NVLink configuration
+- **Hotplug configuration** - Whether hotplug is enabled/disabled
+- **QEMU version** - The QEMU version used to run the VM
+
+<Warning>
+  There is no universal set of measurements for a Dstack version. You must compute measurements for your specific hardware configuration.
+</Warning>
+
+## What gets measured
+
+TDX measurement registers verify the complete boot chain:
+
+| Register | Measures | Scope |
+|----------|----------|-------|
+| **MRTD** | TD memory contents and configuration (TDVF/firmware) | Generic TDX |
+| **RTMR0** | Virtual hardware environment | Generic TDX |
+| **RTMR1** | Linux kernel | Generic TDX |
+| **RTMR2** | Kernel command-line and initramfs | Generic TDX |
+| **RTMR3** | App compose, TLS certificates, runtime measurements | Dstack-specific |
+
+<Info>
+  MRTD and RTMR0-2 are generic Intel TDX measurements. RTMR3 verification is Dstack-specific and handled automatically by the verifier.
+</Info>
+
+## Requirements
+
+You need a Linux machine with:
+
+- Docker installed
+- Cargo (Rust toolchain) installed
+- Internet connection to download Dstack releases
+
+## Complete measurement process
+
+This guide uses [Dstack v0.5.4.1 Nvidia](https://github.com/nearai/private-ml-sdk/releases/tag/v0.5.4.1) as an example.
+
+Dstack releases:
+- GPU releases: https://github.com/nearai/private-ml-sdk/releases
+- CPU releases: https://github.com/Dstack-TEE/meta-dstack/releases
+
+### Step 1: Set up working directory
+
+```bash
+tmp_wd=$(mktemp -d)
+cd $tmp_wd
+```
+
+### Step 2: Clone Dstack and build measurement tools
+
+```bash
+# Clone dstack repository
+git clone https://github.com/Dstack-TEE/dstack.git
+
+# Build dstack-mr measurement tool
+cd dstack/dstack-mr/cli/
+cargo build --release
+
+# Build dependencies (dstack-acpi-tables and QEMU files)
+cd $tmp_wd/dstack
+docker build --target acpi-builder -t dstack-acpi-builder -f verifier/builder/Dockerfile verifier/
+
+# Extract dependencies from container
+docker container create --name temp-copy dstack-acpi-builder
+docker cp temp-copy:/usr/local/bin/dstack-acpi-tables $tmp_wd/dstack-acpi-tables
+docker cp temp-copy:/usr/local/share/qemu/. $tmp_wd/.
+docker rm temp-copy
+```
+
+### Step 3: Reproduce and extract the Dstack release
+
+```bash
+cd $tmp_wd
+
+# Download the reproducible build script
+wget https://github.com/nearai/private-ml-sdk/releases/download/v0.5.4.1/reproduce.sh
+
+# Review the script to verify it builds from expected commit
+cat reproduce.sh
+
+# Run the reproducible build
+chmod +x reproduce.sh
+./reproduce.sh
+
+# Extract the release
+tar -xzvf dstack-nvidia-0.5.4.1.tar.gz --strip-components=1
+```
+
+### Step 4: Compute bootchain measurements
+
+You need your target VM configuration. Example:
+
+```json
+{
+  "spec_version": 1,
+  "os_image_hash": "86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a",
+  "cpu_count": 24,
+  "memory_size": 274877906944,
+  "qemu_version": "9.2.1",
+  "pci_hole64_size": 1125899906842624,
+  "hugepages": false,
+  "num_gpus": 1,
+  "num_nvswitches": 0,
+  "hotplug_off": true,
+  "image": "dstack-nvidia-0.5.4.1"
+}
+```
+
+Compute measurements using these values:
+
+```bash
+PATH=$tmp_wd/dstack/target/release:$tmp_wd:$PATH dstack-mr measure \
+  --num-gpus 1 \
+  --cpu 24 \
+  --memory 274877906944 \
+  --num-nvswitches 0 \
+  --hotplug-off true \
+  --pci-hole64-size 1125899906842624 \
+  --qemu-version "9.2.1" \
+  metadata.json
+```
+
+Output:
+
+```
+Machine measurements:
+MRTD: b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217
+RTMR0: 24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418
+RTMR1: 6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7
+RTMR2: 89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57
+```
+
+### Step 5: Compute OS image hash
+
+The OS image hash is the SHA256 of the `sha256sum.txt` file:
+
+```bash
+# View the sha256sum.txt contents (individual component hashes)
+cat sha256sum.txt
+```
+
+Output:
+```
+76888ce69c91aed86c43f840b913899b40b981964b7ce6018667f91ad06301f0  ovmf.fd
+e6fa48d3d894331e7b750484ee617f5f00b5695be8326f2a3ff906ef275abe8c  bzImage
+4b935cdd58b22697cb5a1b789b59f6ef2337dd4e9f5acb1f29bf9ef4c5a05d4a  initramfs.cpio.gz
+67ebcdef2e771dafc0d3a3f694dfb5e66563723d908b90705434cc898a81be96  metadata.json
+```
+
+Compute the OS image hash:
+
+```bash
+sha256sum sha256sum.txt
+```
+
+Output:
+```
+86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a  sha256sum.txt
+```
+
+### Step 6: Clean up
+
+```bash
+rm -rf $tmp_wd
+```
+
+## Using measurements in your policy
+
+Add the computed values to your policy configuration:
+
+<CodeGroup>
+```rust Rust
+use atlas_rs::{Policy, DstackTdxPolicy, ExpectedBootchain};
+use serde_json::json;
+
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain {
+        mrtd: "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217".into(),
+        rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418".into(),
+        rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7".into(),
+        rtmr2: "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57".into(),
+    }),
+    os_image_hash: Some("86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a".into()),
+    app_compose: Some(json!({
+        "runner": "docker-compose",
+        "docker_compose_file": "..."
+    })),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    ..Default::default()
+});
+```
+
+```json JSON
+{
+  "type": "dstack_tdx",
+  "expected_bootchain": {
+    "mrtd": "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+    "rtmr0": "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418",
+    "rtmr1": "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7",
+    "rtmr2": "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57"
+  },
+  "os_image_hash": "86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a",
+  "app_compose": {
+    "runner": "docker-compose",
+    "docker_compose_file": "..."
+  },
+  "allowed_tcb_status": ["UpToDate"]
+}
+```
+</CodeGroup>
+
+## Reproducibility
+
+All Dstack measurements are computed using reproducible builds:
+
+- Building the same Dstack version on different machines produces identical measurements
+- This allows independent verification of Dstack image integrity
+- Build process follows: [Dstack reproducible builds](https://github.com/Dstack-TEE/meta-dstack?tab=readme-ov-file#reproducible-build-the-guest-image)
+
+## Troubleshooting
+
+### Bootchain mismatch error
+
+If you get a `BootchainMismatch` error:
+
+1. **Verify Dstack version** - Ensure the remote TEE is running the expected Dstack version
+2. **Check hardware configuration** - Verify CPU count, memory, GPUs match your measurement configuration
+3. **Recompute measurements** - Use the exact hardware configuration of your deployment
+4. **Verify measurement tool** - Ensure you're using the correct `dstack-mr` version
+
+### OS image hash mismatch error
+
+If you get an `OsImageHashMismatch` error:
+
+1. **Check the TEE boot image** - Verify the TEE booted with the expected Dstack image
+2. **Recompute the hash** - Ensure you computed the SHA256 of `sha256sum.txt`, not individual components
+3. **Verify release integrity** - Check that the Dstack release wasn't modified
+
+### dstack-mr build failures
+
+If `cargo build --release` fails:
+
+1. **Update Rust** - Ensure you have a recent Rust toolchain: `rustup update`
+2. **Check dependencies** - Verify Docker is running for the ACPI builder step
+3. **Review error messages** - Missing system dependencies may be indicated
+
+## References
+
+- [Dstack GitHub Repository](https://github.com/Dstack-TEE/dstack)
+- [Meta-Dstack Reproducible Build Guide](https://github.com/Dstack-TEE/meta-dstack?tab=readme-ov-file#reproducible-build-the-guest-image)
+- [Understanding TDX Attestation Reports](https://phala.com/posts/understanding-tdx-attestation-reports-a-developers-guide)
+
+## Related
+
+<CardGroup cols={2}>
+  <Card title="DstackTdx policy" icon="shield-check" href="/policy/dstack-tdx">
+    Configure Intel TDX attestation
+  </Card>
+  <Card title="TCB status values" icon="certificate" href="/policy/tcb-status">
+    Understanding TCB security levels
+  </Card>
+</CardGroup>

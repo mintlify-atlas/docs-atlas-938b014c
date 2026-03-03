@@ -1,0 +1,245 @@
+---
+title: Verification flow
+description: Step-by-step attestation verification process in Atlas
+---
+
+Atlas performs attestation verification through a carefully ordered sequence of cryptographic checks that establish trust in the remote TEE.
+
+## Overview
+
+When `atls_connect()` is called, the following steps execute:
+
+1. **TLS handshake** - Establish TLS connection using webpki-roots CA bundle
+2. **Certificate capture** - Extract server's leaf certificate (DER-encoded)
+3. **EKM extraction** - Extract TLS session Exported Keying Material (RFC 9266)
+4. **Policy → Verifier** - Call `policy.into_verifier()` to create the verifier
+5. **Attestation** - Call `verifier.verify(stream, cert, session_ekm, hostname)`
+6. **Return** - Return `(TlsStream, Report)` for continued communication
+
+The attestation step (5) performs the TEE-specific verification detailed below.
+
+## TLS handshake and session binding
+
+### TLS 1.3 connection
+
+Atlas uses standard TLS 1.3 with CA certificate verification:
+
+```rust
+let mut root_store = RootCertStore::empty();
+root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+let config = ClientConfig::builder()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+```
+
+This ensures the server certificate is valid and signed by a trusted CA before attestation begins.
+
+### EKM extraction for session binding
+
+After the TLS handshake completes, Atlas extracts the session EKM (Exported Keying Material):
+
+```rust
+let mut session_ekm = vec![0u8; 32];
+conn.export_keying_material(
+    &mut session_ekm,
+    b"EXPORTER-Channel-Binding",
+    None
+)?;
+```
+
+<Note>
+The EKM uniquely identifies this TLS session. By including it in the attestation quote's `report_data`, the server proves the quote was generated specifically for this connection, preventing relay attacks.
+</Note>
+
+## DStack TDX verification flow
+
+For Intel TDX via DStack, the verifier executes these steps:
+
+### Step 1: Generate nonce and request quote
+
+Generate a random 32-byte nonce to prevent replay attacks:
+
+```rust
+let mut nonce = [0u8; 32];
+rand::Rng::fill(&mut rand::thread_rng(), &mut nonce);
+```
+
+Send HTTP POST request to `/tdx_quote` endpoint:
+
+```http
+POST /tdx_quote HTTP/1.1
+Host: {hostname}
+Content-Type: application/json
+
+{"nonce_hex": "{hex_encoded_nonce}"}
+```
+
+The server responds with:
+- Base64-encoded TDX quote
+- Base64-encoded event log
+
+### Step 2: Parse event log
+
+Decode the event log using dstack-sdk-types:
+
+```rust
+let events = quote_response
+    .decode_event_log()
+    .map_err(|e| AtlsVerificationError::Other(e.into()))?;
+```
+
+The event log contains measurements of runtime state (certificate hash, app config hash, OS image hash).
+
+### Step 3: Verify certificate binding
+
+Compute SHA256 hash of the TLS certificate:
+
+```rust
+let cert_hash = hex::encode(Sha256::digest(peer_cert));
+```
+
+Find the last "New TLS Certificate" event in the event log and verify the hash matches.
+
+<Note>
+This proves the TLS certificate was generated inside the TEE and measured into the event log before the quote was created.
+</Note>
+
+### Step 4: Verify DCAP quote
+
+Fetch collateral from Intel PCS and verify the quote cryptographically:
+
+```rust
+let collateral = get_collateral(pccs_url, quote).await?;
+let verified_report = verify(quote, &collateral, now_secs)?;
+```
+
+This step:
+- Validates the quote signature using Intel's root keys
+- Checks the quote was signed by a genuine TDX CPU
+- Extracts the `report_data` and measurements (MRTD, RTMRs)
+- Verifies TCB (Trusted Computing Base) status
+
+<Note>
+The `verified_report` is now cryptographically trusted. All subsequent checks compare against this verified report to establish the trust chain.
+</Note>
+
+### Step 5: Verify report_data binding
+
+Compute expected report_data from nonce and session EKM:
+
+```rust
+let mut hasher = Sha512::new();
+hasher.update(nonce);
+hasher.update(session_ekm);
+let expected_report_data: [u8; 64] = hasher.finalize().into();
+```
+
+Compare against the report_data from the verified quote:
+
+```rust
+if expected_report_data != td_report.report_data {
+    return Err(AtlsVerificationError::ReportDataMismatch { ... });
+}
+```
+
+This proves:
+- The quote was generated for this specific verification request (nonce)
+- The quote is bound to this specific TLS session (EKM)
+
+### Step 6: Verify RTMR replay
+
+Replay the event log to recompute RTMRs:
+
+```rust
+let replayed_rtmrs = quote_response.replay_rtmrs()?;
+```
+
+Compare replayed RTMRs against the trusted values from the verified report:
+
+```rust
+for i in 0..4u8 {
+    let replayed = replayed_rtmrs.get(&i)?;
+    let trusted = hex::encode(td_report.rt_mr[i]);
+    if replayed != trusted {
+        return Err(AtlsVerificationError::RtmrMismatch { ... });
+    }
+}
+```
+
+<Note>
+RTMR replay establishes trust in the event log. Because the replayed RTMRs match the cryptographically verified report, we can now trust all measurements in the event log.
+</Note>
+
+### Step 7: Verify bootchain measurements
+
+Compare bootchain measurements from the verified report against expected values:
+
+```rust
+let actual_mrtd = hex::encode(td_report.mr_td);
+if actual_mrtd != bootchain.mrtd {
+    return Err(AtlsVerificationError::BootchainMismatch { ... });
+}
+
+// Similarly for RTMR0, RTMR1, RTMR2
+```
+
+Bootchain measurements verify:
+- **MRTD** - Initial TD memory contents (TDVF/firmware)
+- **RTMR0** - Virtual hardware environment
+- **RTMR1** - Linux kernel
+- **RTMR2** - Kernel cmdline + initramfs
+
+### Step 8: Verify app compose hash
+
+Find the "compose-hash" event in the trusted event log:
+
+```rust
+let event = events.iter().find(|e| e.event == "compose-hash")?;
+let expected = get_compose_hash(app_compose)?;
+
+if event.event_payload != expected {
+    return Err(AtlsVerificationError::AppComposeHashMismatch { ... });
+}
+```
+
+This verifies the application configuration (Docker Compose equivalent) matches expectations.
+
+### Step 9: Verify OS image hash
+
+Find the "os-image-hash" event in the trusted event log:
+
+```rust
+let event = events.iter().find(|e| e.event == "os-image-hash")?;
+
+if event.event_payload != expected_os_image_hash {
+    return Err(AtlsVerificationError::OsImageHashMismatch { ... });
+}
+```
+
+This verifies the OS image (initramfs) matches the expected version.
+
+## Trust chain summary
+
+The verification flow establishes a complete trust chain:
+
+```
+1. TLS certificate ← Verified by CA
+2. TDX quote ← Verified by Intel DCAP (cryptographic proof)
+3. report_data ← Links nonce + session EKM to quote
+4. Event log ← Verified by RTMR replay against trusted report
+5. Runtime state ← Verified against trusted event log
+   - Certificate hash
+   - App config hash  
+   - OS image hash
+6. Bootchain ← Verified against trusted report measurements
+   - MRTD, RTMR0-2
+```
+
+Each step builds on the previous, creating an unbroken chain from the trusted root (Intel's signing keys) to the runtime application state.
+
+## See also
+
+- [TLS handshake](/protocol/tls-handshake) - TLS 1.3 connection details
+- [Quote retrieval](/protocol/quote-retrieval) - Quote fetching protocol
+- [Verification steps](/protocol/verification-steps) - Detailed verification checks

@@ -1,0 +1,297 @@
+---
+title: Rust
+description: Connect to TEEs from Rust applications using attested TLS
+---
+
+Connect to Trusted Execution Environments (TEEs) from Rust applications using attested TLS. The Rust library provides both high-level and low-level APIs for attestation verification.
+
+## Installation
+
+<Steps>
+  <Step title="Add to Cargo.toml">
+    ```toml
+    [dependencies]
+    atlas-rs = "0.1"
+    ```
+
+    Or use `cargo add`:
+
+    ```bash
+    cargo add atlas-rs
+    ```
+  </Step>
+
+  <Step title="Development version (optional)">
+    To use the latest development version from GitHub:
+
+    ```toml
+    [dependencies]
+    atlas-rs = { git = "https://github.com/concrete-security/atlas", branch = "main" }
+    ```
+  </Step>
+</Steps>
+
+## Quick start
+
+<Tabs>
+  <Tab title="Development mode">
+    For development and testing, use `DstackTdxPolicy::dev()` which accepts more TCB statuses but still verifies the TEE:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let tcp = tokio::net::TcpStream::connect("tee-server.example.com:443").await?;
+
+        // Development policy - relaxed TCB status, no bootchain verification
+        let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+        let (mut tls_stream, report) = atls_connect(tcp, "tee-server.example.com", policy, None).await?;
+
+        // Access attestation report
+        match &report {
+            atlas_rs::Report::Tdx(tdx_report) => {
+                println!("TEE verified! TCB Status: {}", tdx_report.status);
+            }
+        }
+
+        // Use tls_stream for subsequent requests...
+        Ok(())
+    }
+    ```
+  </Tab>
+
+  <Tab title="Production mode">
+    For production, provide bootchain measurements and app configuration:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, ExpectedBootchain};
+    use serde_json::json;
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        let tcp = tokio::net::TcpStream::connect("vllm.concrete-security.com:443").await?;
+
+        // Full verification policy
+        let policy = Policy::DstackTdx(DstackTdxPolicy {
+            expected_bootchain: Some(ExpectedBootchain {
+                mrtd: "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217".into(),
+                rtmr0: "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418".into(),
+                rtmr1: "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7".into(),
+                rtmr2: "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57".into(),
+            }),
+            os_image_hash: Some("86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a".into()),
+            app_compose: Some(json!({
+                "runner": "docker-compose",
+                "docker_compose_file": "version: '3'\nservices:\n  vllm:\n    image: vllm/vllm-openai:latest\n    ..."
+            })),
+            allowed_tcb_status: vec!["UpToDate".into()],
+            ..Default::default()
+        });
+
+        let (mut tls_stream, report) = atls_connect(tcp, "vllm.concrete-security.com", policy, None).await?;
+
+        println!("TEE fully verified!");
+
+        // Use tls_stream for API requests...
+        Ok(())
+    }
+    ```
+  </Tab>
+
+  <Tab title="JSON policy">
+    Policies can be loaded from JSON files:
+
+    ```rust
+    use atlas_rs::{atls_connect, Policy};
+
+    #[tokio::main]
+    async fn main() -> Result<(), Box<dyn std::error::Error>> {
+        // Load policy from JSON
+        let policy_json = r#"{
+            "type": "dstack_tdx",
+            "allowed_tcb_status": ["UpToDate", "OutOfDate"],
+            "grace_period": 2592000,
+            "expected_bootchain": {
+                "mrtd": "b24d3b24e9e3c16012376b52362ca09856c4adecb709d5fac33addf1c47e193da075b125b6c364115771390a5461e217",
+                "rtmr0": "24c15e08c07aa01c531cbd7e8ba28f8cb62e78f6171bf6a8e0800714a65dd5efd3a06bf0cf5433c02bbfac839434b418",
+                "rtmr1": "6e1afb7464ed0b941e8f5bf5b725cf1df9425e8105e3348dca52502f27c453f3018a28b90749cf05199d5a17820101a7",
+                "rtmr2": "89e73cedf48f976ffebe8ac1129790ff59a0f52d54d969cb73455b1a79793f1dc16edc3b1fccc0fd65ea5905774bbd57"
+            },
+            "os_image_hash": "86b181377635db21c415f9ece8cc8505f7d4936ad3be7043969005a8c4690c1a",
+            "app_compose": {
+                "runner": "docker-compose",
+                "docker_compose_file": "..."
+            }
+        }"#;
+
+        let policy: Policy = serde_json::from_str(policy_json)?;
+
+        let tcp = tokio::net::TcpStream::connect("tee-server.example.com:443").await?;
+        let (tls_stream, report) = atls_connect(tcp, "tee-server.example.com", policy, None).await?;
+
+        Ok(())
+    }
+    ```
+  </Tab>
+</Tabs>
+
+## API reference
+
+### atls_connect(tcp, hostname, policy, session)
+
+High-level function to establish an attested TLS connection:
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+
+let tcp = tokio::net::TcpStream::connect("tee.example.com:443").await?;
+let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+let (tls_stream, report) = atls_connect(
+    tcp,
+    "tee.example.com",  // Server hostname for SNI
+    policy,              // Verification policy
+    None                 // Optional TLS client config
+).await?;
+```
+
+Returns:
+- `tls_stream`: A `tokio_rustls::client::TlsStream` for sending/receiving data
+- `report`: Attestation report containing TEE measurements and TCB status
+
+### AtlsVerifier trait
+
+For custom TLS handling, use the `AtlsVerifier` trait directly:
+
+```rust
+use atlas_rs::{DstackTDXVerifier, AtlsVerifier, ExpectedBootchain};
+use serde_json::json;
+
+let verifier = DstackTDXVerifier::builder()
+    .app_compose(json!({
+        "runner": "docker-compose",
+        "docker_compose_file": "..."
+    }))
+    .expected_bootchain(ExpectedBootchain {
+        mrtd: "b24d3b24...".into(),
+        rtmr0: "24c15e08...".into(),
+        rtmr1: "6e1afb74...".into(),
+        rtmr2: "89e73ced...".into(),
+    })
+    .os_image_hash("86b18137...")
+    .build()?;
+
+// Use with your own TLS stream
+// let report = verifier.verify(&mut tls_stream, &peer_cert, "hostname").await?;
+```
+
+### Policy types
+
+#### Policy::DstackTdx(DstackTdxPolicy)
+
+Intel TDX verification policy for Dstack deployments:
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy, ExpectedBootchain};
+use serde_json::json;
+
+let policy = Policy::DstackTdx(DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain {
+        mrtd: "b24d3b24...".into(),
+        rtmr0: "24c15e08...".into(),
+        rtmr1: "6e1afb74...".into(),
+        rtmr2: "89e73ced...".into(),
+    }),
+    os_image_hash: Some("86b18137...".into()),
+    app_compose: Some(json!({...})),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    grace_period: Some(2592000),  // 30 days in seconds
+    ..Default::default()
+});
+```
+
+### Report types
+
+#### Report::Tdx(TdxReport)
+
+Attestation report for Intel TDX:
+
+```rust
+match report {
+    atlas_rs::Report::Tdx(tdx_report) => {
+        println!("TCB Status: {}", tdx_report.status);
+        println!("MRTD: {}", tdx_report.mrtd);
+        println!("RTMR0: {}", tdx_report.rtmr0);
+    }
+}
+```
+
+## Error handling
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy, AtlsVerificationError};
+
+async fn verify_tee() -> Result<(), AtlsVerificationError> {
+    let tcp = tokio::net::TcpStream::connect("tee.example.com:443")
+        .await
+        .map_err(|e| AtlsVerificationError::Io(e.to_string()))?;
+
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+    match atls_connect(tcp, "tee.example.com", policy, None).await {
+        Ok((stream, report)) => {
+            println!("Verification succeeded!");
+            Ok(())
+        }
+        Err(AtlsVerificationError::BootchainMismatch { field, expected, actual }) => {
+            eprintln!("Bootchain mismatch in {}: expected {}, got {}", field, expected, actual);
+            Err(AtlsVerificationError::BootchainMismatch { field, expected, actual })
+        }
+        Err(AtlsVerificationError::TcbStatusNotAllowed { status, allowed }) => {
+            eprintln!("TCB status {} not in allowed list {:?}", status, allowed);
+            Err(AtlsVerificationError::TcbStatusNotAllowed { status, allowed })
+        }
+        Err(e) => Err(e),
+    }
+}
+```
+
+## Policy configuration
+
+By default, all runtime fields are required for production policies. Missing fields will cause a configuration error unless `disable_runtime_verification` is set to `true`.
+
+```rust
+use atlas_rs::{Policy, DstackTdxPolicy, ExpectedBootchain};
+use serde_json::json;
+
+// Development policy - explicitly disables runtime verification
+let dev_policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+
+// Production policy - all runtime fields required
+let prod_policy = Policy::DstackTdx(DstackTdxPolicy {
+    expected_bootchain: Some(ExpectedBootchain {
+        mrtd: "b24d3b24...".into(),
+        rtmr0: "24c15e08...".into(),
+        rtmr1: "6e1afb74...".into(),
+        rtmr2: "89e73ced...".into(),
+    }),
+    os_image_hash: Some("86b18137...".into()),
+    app_compose: Some(json!({...})),
+    allowed_tcb_status: vec!["UpToDate".into()],
+    grace_period: Some(30 * 24 * 60 * 60),  // 30 days
+    ..Default::default()
+});
+
+// This will FAIL - missing runtime fields without disable_runtime_verification
+let invalid_policy = Policy::DstackTdx(DstackTdxPolicy::default());
+// invalid_policy.into_verifier() returns Err(Configuration(...))
+```
+
+See [Policy Configuration](/core-concepts/policies) for complete field descriptions.
+
+## Platform support
+
+- **Native** (Linux, macOS, Windows): Full support with tokio async I/O
+- **WASM**: Browser support via futures async I/O (see [Browser/WASM](/platforms/browser-wasm))

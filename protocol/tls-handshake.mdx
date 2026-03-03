@@ -1,0 +1,253 @@
+---
+title: TLS handshake
+description: TLS 1.3 connection establishment and certificate handling in Atlas
+---
+
+Atlas establishes a standard TLS 1.3 connection before performing attestation verification. The TLS handshake provides transport security and captures the server certificate for later binding verification.
+
+## TLS 1.3 connection
+
+Atlas uses rustls to establish TLS connections with CA certificate verification:
+
+```rust
+let mut root_store = RootCertStore::empty();
+root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+let mut config = ClientConfig::builder()
+    .with_root_certificates(root_store)
+    .with_no_client_auth();
+```
+
+The `webpki-roots` crate provides Mozilla's trusted CA bundle, ensuring the server presents a valid certificate signed by a recognized authority.
+
+### ALPN configuration
+
+Optional ALPN (Application-Layer Protocol Negotiation) protocols can be specified:
+
+```rust
+if let Some(protocols) = alpn {
+    config.alpn_protocols = protocols
+        .into_iter()
+        .map(|s| s.into_bytes())
+        .collect();
+}
+```
+
+Common ALPN values:
+- `["http/1.1"]` - HTTP/1.1
+- `["h2"]` - HTTP/2
+- `["http/1.1", "h2"]` - Both, with preference order
+
+### Connection establishment
+
+```rust
+let connector = TlsConnector::from(Arc::new(config));
+let server_name_parsed = ServerName::try_from(server_name.to_owned())?;
+
+let tls_stream = connector
+    .connect(server_name_parsed, stream)
+    .await?;
+```
+
+The `server_name` is used for:
+- SNI (Server Name Indication) in the TLS handshake
+- Certificate hostname verification
+- Later attestation verification
+
+## Certificate extraction
+
+After the handshake completes, extract the server's leaf certificate:
+
+```rust
+let (_, conn) = tls_stream.get_ref();
+let peer_cert = conn
+    .peer_certificates()
+    .and_then(|certs| certs.first())
+    .map(|cert| cert.as_ref().to_vec())
+    .ok_or(AtlsVerificationError::MissingCertificate)?;
+```
+
+The certificate is in DER (Distinguished Encoding Rules) format - a binary ASN.1 encoding.
+
+<Note>
+Atlas captures the entire certificate chain, but only uses the leaf certificate for attestation binding. The chain validation is handled by rustls during the handshake.
+</Note>
+
+## Session binding with EKM
+
+Atlas extracts the TLS session Exported Keying Material (EKM) as specified in RFC 5705 and extended in RFC 9266:
+
+```rust
+let mut session_ekm = vec![0u8; 32];
+conn.export_keying_material(
+    &mut session_ekm,
+    b"EXPORTER-Channel-Binding",
+    None
+)?;
+```
+
+### What is EKM?
+
+EKM is a unique value derived from the TLS session keys. It has these properties:
+
+- **Session-specific** - Different for every TLS connection
+- **Secret** - Known only to the client and server
+- **Cryptographically derived** - Cannot be guessed or forged
+- **Stable** - Doesn't change during the session
+
+### Why use EKM for session binding?
+
+The EKM solves a critical security problem: **relay attacks**.
+
+Without session binding:
+1. Attacker connects to legitimate TEE server
+2. Client connects to attacker's proxy
+3. Attacker relays the TEE's attestation quote to the client
+4. Client believes it's talking to the TEE
+5. Attacker can now MITM the connection
+
+With EKM binding:
+1. Client extracts EKM from its TLS session with the proxy
+2. Client sends EKM to server as part of attestation request
+3. Server includes SHA512(nonce || EKM) in the attestation quote's `report_data`
+4. Client verifies the `report_data` matches its EKM
+5. Because the attacker's EKM differs from the client's EKM, verification fails
+
+<Note>
+The EKM uniquely identifies the TLS session. By including it in the attestation quote, the server proves the quote was generated specifically for this TLS connection.
+</Note>
+
+### EKM in the verification flow
+
+The EKM is used later in attestation verification:
+
+```rust
+// Client side: compute expected report_data
+let mut hasher = Sha512::new();
+hasher.update(nonce);        // 32 bytes
+hasher.update(session_ekm);  // 32 bytes
+let expected_report_data: [u8; 64] = hasher.finalize().into();
+
+// Compare against quote's report_data
+if expected_report_data != quote.report_data {
+    return Err(AtlsVerificationError::ReportDataMismatch);
+}
+```
+
+This proves:
+1. The quote was generated for this verification request (nonce binding)
+2. The quote was generated within this TLS session (EKM binding)
+
+## Platform support
+
+Atlas supports both native and WASM platforms for TLS:
+
+### Native (tokio)
+
+```rust
+#[cfg(not(target_arch = "wasm32"))]
+pub use tokio_rustls::client::TlsStream;
+#[cfg(not(target_arch = "wasm32"))]
+use tokio_rustls::TlsConnector;
+```
+
+Native targets use `tokio-rustls` for async TLS operations.
+
+### WASM (futures)
+
+```rust
+#[cfg(target_arch = "wasm32")]
+pub use futures_rustls::client::TlsStream;
+#[cfg(target_arch = "wasm32")]
+use futures_rustls::TlsConnector;
+```
+
+WASM targets use `futures-rustls` which works in browser environments.
+
+<Note>
+Both implementations provide identical APIs. The platform-specific code is hidden behind conditional compilation, making Atlas portable across environments.
+</Note>
+
+## Error handling
+
+Common TLS handshake errors:
+
+### Invalid server name
+
+```rust
+AtlsVerificationError::InvalidServerName(e.to_string())
+```
+
+Caused by:
+- Invalid hostname format
+- Punycode decoding failure
+
+### Handshake failure
+
+```rust
+AtlsVerificationError::TlsHandshake(e.to_string())
+```
+
+Caused by:
+- Certificate validation failure
+- Unsupported TLS version
+- Cipher suite mismatch
+- Network errors
+
+### Missing certificate
+
+```rust
+AtlsVerificationError::MissingCertificate
+```
+
+Caused by:
+- Server sent empty certificate chain
+- Client auth configured incorrectly
+
+### EKM extraction failure
+
+```rust
+AtlsVerificationError::TlsHandshake(
+    format!("Failed to extract session EKM: {}", e)
+)
+```
+
+Caused by:
+- TLS session not fully established
+- Unsupported TLS version (< 1.3)
+
+## Example usage
+
+Complete TLS handshake with attestation:
+
+```rust
+use atlas_rs::{atls_connect, Policy, DstackTdxPolicy};
+use tokio::net::TcpStream;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Establish TCP connection
+    let tcp = TcpStream::connect("tee.example.com:443").await?;
+    
+    // Configure attestation policy
+    let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+    
+    // Perform TLS handshake + attestation
+    let (mut tls_stream, report) = atls_connect(
+        tcp,
+        "tee.example.com",
+        policy,
+        Some(vec!["http/1.1".into()])
+    ).await?;
+    
+    // TLS connection is now established and attested
+    // Use tls_stream for secure, verified communication
+    
+    Ok(())
+}
+```
+
+## See also
+
+- [Quote retrieval](/protocol/quote-retrieval) - Fetching attestation evidence
+- [Verification steps](/protocol/verification-steps) - Complete verification process

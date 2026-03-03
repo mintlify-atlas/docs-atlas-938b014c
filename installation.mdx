@@ -1,0 +1,385 @@
+---
+title: Installation
+description: Install Atlas for Node.js, Browser/WASM, or Rust
+---
+
+Atlas is available for three platforms. Choose the one that matches your application:
+
+<Tabs>
+  <Tab title="Node.js">
+    ## Requirements
+
+    - Node.js 18 or higher
+    - npm, pnpm, or yarn
+
+    ## Install package
+
+    <CodeGroup>
+    ```bash npm
+    npm install @concrete-security/atlas-node
+    ```
+
+    ```bash pnpm
+    pnpm add @concrete-security/atlas-node
+    ```
+
+    ```bash yarn
+    yarn add @concrete-security/atlas-node
+    ```
+    </CodeGroup>
+
+    ## Supported platforms
+
+    Prebuilt native binaries are included for:
+
+    - macOS (x64, Apple Silicon)
+    - Linux (x64, arm64)
+    - Windows (x64, arm64)
+
+    The correct binary is automatically selected during installation based on your platform.
+
+    ## Verify installation
+
+    Create a test file to verify the installation:
+
+    ```typescript test.mjs
+    import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+    console.log("Atlas Node.js package installed successfully!")
+    console.log(typeof createAtlsFetch) // "function"
+    ```
+
+    Run it:
+
+    ```bash
+    node test.mjs
+    ```
+
+    ## TypeScript support
+
+    TypeScript definitions are included automatically. No additional `@types` packages are needed.
+
+    ```typescript
+    import { 
+      createAtlsFetch, 
+      createAtlsAgent,
+      AtlsAttestation,
+      Policy 
+    } from "@concrete-security/atlas-node"
+    ```
+
+    ## Next steps
+
+    - Follow the [Node.js quickstart](/quickstart#nodejs)
+    - Read the [Node.js platform guide](/platforms/nodejs)
+    - Explore the [Node.js API reference](/api/nodejs/create-atls-fetch)
+  </Tab>
+
+  <Tab title="Browser/WASM">
+    ## Requirements
+
+    - Modern browser with WebAssembly support
+    - npm, pnpm, or yarn (for bundler-based projects)
+
+    ## Install package
+
+    <CodeGroup>
+    ```bash npm
+    npm install @concrete-security/atlas-wasm
+    ```
+
+    ```bash pnpm
+    pnpm add @concrete-security/atlas-wasm
+    ```
+
+    ```bash yarn
+    yarn add @concrete-security/atlas-wasm
+    ```
+    </CodeGroup>
+
+    The package includes prebuilt WASM binaries. No additional build steps are required.
+
+    ## Install proxy
+
+    Browser applications require a WebSocket-to-TCP proxy:
+
+    <CodeGroup>
+    ```bash cargo
+    cargo install atlas-proxy
+    ```
+
+    ```bash source
+    # Clone Atlas repository
+    git clone https://github.com/concrete-security/atlas.git
+    cd atlas
+
+    # Build proxy
+    cargo build -p atlas-proxy --release
+
+    # Binary location: target/release/atlas-proxy
+    ```
+    </CodeGroup>
+
+    ## Configure proxy
+
+    The proxy requires an allowlist for security:
+
+    ```bash
+    # Required: set allowed targets
+    export ATLS_PROXY_ALLOWLIST="llm.example.com:443,api.example.com:443"
+
+    # Optional: set listen address (defaults to 127.0.0.1:9000)
+    export ATLS_PROXY_LISTEN="127.0.0.1:9000"
+
+    # Start proxy
+    atlas-proxy
+    ```
+
+    <Warning>
+    The `ATLS_PROXY_ALLOWLIST` is required. The proxy will reject all connections without it. This prevents SSRF attacks.
+    </Warning>
+
+    ## Verify installation
+
+    Create a test HTML file:
+
+    ```html index.html
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <title>Atlas WASM Test</title>
+    </head>
+    <body>
+      <h1>Atlas WASM Test</h1>
+      <div id="output"></div>
+
+      <script type="module">
+        import { init, createAtlsFetch } from "@concrete-security/atlas-wasm"
+
+        await init()
+        document.getElementById("output").textContent = "Atlas WASM loaded successfully!"
+      </script>
+    </body>
+    </html>
+    ```
+
+    Serve it with a local HTTP server:
+
+    ```bash
+    npx serve .
+    ```
+
+    ## Bundler configuration
+
+    ### Vite
+
+    No special configuration needed. Vite handles WASM automatically.
+
+    ### Webpack
+
+    Add WASM support to your webpack config:
+
+    ```javascript webpack.config.js
+    module.exports = {
+      experiments: {
+        asyncWebAssembly: true
+      }
+    }
+    ```
+
+    ### Next.js
+
+    Add WASM support to `next.config.js`:
+
+    ```javascript next.config.js
+    module.exports = {
+      webpack: (config) => {
+        config.experiments = {
+          ...config.experiments,
+          asyncWebAssembly: true
+        }
+        return config
+      }
+    }
+    ```
+
+    ## Next steps
+
+    - Follow the [Browser/WASM quickstart](/quickstart#browserwasm)
+    - Read the [Browser/WASM platform guide](/platforms/browser-wasm)
+    - Learn about [proxy setup and configuration](/deployment/proxy-setup)
+    - Explore the [WASM API reference](/api/wasm/create-atls-fetch)
+  </Tab>
+
+  <Tab title="Rust">
+    ## Requirements
+
+    - Rust 1.75 or higher
+    - Cargo
+
+    ## Install Rust
+
+    If you don't have Rust installed:
+
+    ```bash
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+    ```
+
+    ## Add to project
+
+    Add to your `Cargo.toml`:
+
+    ```toml Cargo.toml
+    [dependencies]
+    atlas-rs = "0.2"
+    tokio = { version = "1", features = ["rt", "macros", "net"] }
+    ```
+
+    Or use `cargo add`:
+
+    <CodeGroup>
+    ```bash cargo add
+    cargo add atlas-rs
+    cargo add tokio --features rt,macros,net
+    ```
+
+    ```bash latest (GitHub)
+    # Add latest development version from GitHub
+    cargo add atlas-rs --git https://github.com/concrete-security/atlas --branch main
+    ```
+    </CodeGroup>
+
+    ## Verify installation
+
+    Create a test file:
+
+    ```rust src/main.rs
+    use atlas_rs::{Policy, DstackTdxPolicy};
+
+    fn main() {
+        let policy = Policy::DstackTdx(DstackTdxPolicy::dev());
+        println!("Atlas Rust crate installed successfully!");
+        println!("Policy: {:?}", policy);
+    }
+    ```
+
+    Build and run:
+
+    ```bash
+    cargo run
+    ```
+
+    ## Optional features
+
+    Atlas supports optional features for debugging:
+
+    ```toml Cargo.toml
+    [dependencies]
+    atlas-rs = { version = "0.2", features = ["debug-logging"] }
+    ```
+
+    Available features:
+
+    - `debug-logging`: Enable debug logging unconditionally (useful for WASM where env vars don't work)
+
+    ## Platform support
+
+    Atlas works on:
+
+    - **Linux** (x64, arm64): Full support
+    - **macOS** (x64, Apple Silicon): Full support
+    - **Windows** (x64, arm64): Full support
+    - **WebAssembly**: Browser support via `atlas-wasm` package
+
+    ## Development dependencies
+
+    For development and testing:
+
+    ```toml Cargo.toml
+    [dev-dependencies]
+    tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread", "net", "io-util"] }
+    serde_json = "1.0"
+    ```
+
+    ## Next steps
+
+    - Follow the [Rust quickstart](/quickstart#rust)
+    - Read the [Rust platform guide](/platforms/rust)
+    - Explore the [Rust API reference](/api/rust/atls-connect)
+    - Learn about [computing bootchain measurements](/policy/computing-measurements)
+  </Tab>
+</Tabs>
+
+## Version compatibility
+
+Atlas follows semantic versioning. Current versions:
+
+- **Node.js**: `@concrete-security/atlas-node@0.3.0`
+- **Browser/WASM**: `@concrete-security/atlas-wasm@0.2.0`
+- **Rust**: `atlas-rs@0.2.0`
+
+<Note>
+All platforms implement the same aTLS protocol and are interoperable. A Node.js client can connect to a Rust server, and vice versa.
+</Note>
+
+## Troubleshooting
+
+### Node.js: Native module not found
+
+If you see "Cannot find native module" errors:
+
+1. Ensure you're using Node.js 18 or higher
+2. Try reinstalling: `npm install --force @concrete-security/atlas-node`
+3. Check that your platform is supported (see supported platforms above)
+
+### Browser/WASM: Module not loading
+
+If the WASM module fails to load:
+
+1. Ensure you're calling `await init()` before using other functions
+2. Check your bundler configuration (see bundler sections above)
+3. Verify the WASM file is being served with `application/wasm` MIME type
+
+### Rust: Compilation errors
+
+If you encounter compilation errors:
+
+1. Update Rust: `rustup update`
+2. Ensure Rust 1.75 or higher: `rustc --version`
+3. Clean build cache: `cargo clean`
+
+### Proxy: Connection refused
+
+If the proxy won't start:
+
+1. Verify `ATLS_PROXY_ALLOWLIST` is set
+2. Check that port 9000 is available (or use `ATLS_PROXY_LISTEN`)
+3. Ensure the proxy binary has execute permissions
+
+## Getting help
+
+If you need assistance:
+
+- Check the [platform guides](/platforms/nodejs) for detailed documentation
+- Review [examples](/examples/ai-sdk-integration) for common use cases
+- Open an issue on [GitHub](https://github.com/concrete-security/atlas)
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Get up and running with a working example
+  </Card>
+  
+  <Card title="Platform guides" icon="book" href="/platforms/nodejs">
+    Complete guides for each platform
+  </Card>
+  
+  <Card title="Policy configuration" icon="shield-check" href="/policy/overview">
+    Configure attestation policies
+  </Card>
+  
+  <Card title="Examples" icon="code" href="/examples/ai-sdk-integration">
+    More examples and integration patterns
+  </Card>
+</CardGroup>

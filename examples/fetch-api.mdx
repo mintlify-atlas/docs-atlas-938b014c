@@ -1,0 +1,403 @@
+---
+title: Fetch API usage
+description: Advanced fetch patterns for Node.js and browser environments
+---
+
+Atlas provides a fetch-compatible API for making attested requests to TEEs. The API works identically in Node.js and browsers, with platform-specific optimizations.
+
+## Basic usage
+
+Create a fetch function for a specific target:
+
+```typescript
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy: {
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate"]
+  }
+})
+
+const response = await fetch("/api/secure-data")
+console.log(response.attestation.trusted)  // true
+console.log(response.attestation.teeType)  // "tdx"
+```
+
+## Response with attestation
+
+Every response includes attestation data:
+
+```typescript
+const response = await fetch("/api/data")
+
+// Standard Response properties
+console.log(response.status)        // 200
+console.log(response.headers)       // Headers object
+const data = await response.json()  // Parse body
+
+// Attestation data
+console.log(response.attestation)
+// {
+//   trusted: true,
+//   teeType: "tdx",
+//   measurement: "abc123...",
+//   tcbStatus: "UpToDate",
+//   advisoryIds: []
+// }
+```
+
+## Configuration options
+
+<CodeGroup>
+
+```typescript Node.js
+import { createAtlsFetch } from "@concrete-security/atlas-node"
+
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",      // Required: host with optional port
+  serverName: "enclave.example.com",  // Optional: SNI override
+  headers: { "X-Custom": "value" },   // Optional: default headers
+  policy: {                           // Required: verification policy
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate"]
+  },
+  onAttestation: (attestation) => {   // Optional: attestation callback
+    if (!attestation.trusted) {
+      throw new Error("Attestation failed!")
+    }
+    console.log("TEE:", attestation.teeType)
+    console.log("TCB:", attestation.tcbStatus)
+  }
+})
+```
+
+```javascript Browser
+import { init, createAtlsFetch } from "@concrete-security/atlas-wasm"
+
+await init()
+
+const fetch = createAtlsFetch({
+  proxyUrl: "ws://127.0.0.1:9000",     // Required: WebSocket proxy
+  targetHost: "enclave.example.com",  // Required: target host
+  policy: {                           // Required: verification policy
+    type: "dstack_tdx",
+    allowed_tcb_status: ["UpToDate"]
+  },
+  onAttestation: (attestation) => {   // Optional: attestation callback
+    console.log("TEE:", attestation.teeType)
+  }
+})
+```
+
+</CodeGroup>
+
+## HTTP methods
+
+All standard HTTP methods are supported:
+
+```typescript
+const fetch = createAtlsFetch({ target: "enclave.example.com", policy })
+
+// GET request
+const response = await fetch("/api/data")
+
+// POST with JSON body
+const postResponse = await fetch("/api/submit", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ key: "value" })
+})
+
+// PUT with custom headers
+const putResponse = await fetch("/api/update", {
+  method: "PUT",
+  headers: {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${token}`
+  },
+  body: JSON.stringify(data)
+})
+
+// DELETE
+const deleteResponse = await fetch("/api/resource", {
+  method: "DELETE"
+})
+```
+
+## Request bodies
+
+Multiple body types are supported:
+
+```typescript
+const fetch = createAtlsFetch({ target: "enclave.example.com", policy })
+
+// String
+await fetch("/api", {
+  method: "POST",
+  body: "plain text"
+})
+
+// JSON
+await fetch("/api", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ key: "value" })
+})
+
+// Buffer
+await fetch("/api", {
+  method: "POST",
+  body: Buffer.from("data")
+})
+
+// Uint8Array
+await fetch("/api", {
+  method: "POST",
+  body: new Uint8Array([1, 2, 3])
+})
+
+// ReadableStream (streaming upload)
+await fetch("/api", {
+  method: "POST",
+  body: readableStream
+})
+
+// Async iterable
+await fetch("/api", {
+  method: "POST",
+  body: asyncIterable
+})
+```
+
+## Streaming responses
+
+Handle streaming responses with standard Web Streams API:
+
+```typescript
+const response = await fetch("/api/stream")
+
+// Response body is a ReadableStream
+const reader = response.body.getReader()
+
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  
+  // Process chunk (Uint8Array)
+  const text = new TextDecoder().decode(value)
+  console.log(text)
+}
+```
+
+### Server-Sent Events (SSE)
+
+Parse SSE streams:
+
+```typescript
+const response = await fetch("/api/events")
+const reader = response.body.getReader()
+const decoder = new TextDecoder()
+
+let buffer = ""
+
+while (true) {
+  const { done, value } = await reader.read()
+  if (done) break
+  
+  buffer += decoder.decode(value, { stream: true })
+  
+  const lines = buffer.split("\n")
+  buffer = lines.pop() // Keep incomplete line
+  
+  for (const line of lines) {
+    if (line.startsWith("data: ")) {
+      const data = JSON.parse(line.slice(6))
+      console.log(data)
+    }
+  }
+}
+```
+
+### Chunked transfer encoding
+
+Chunked encoding is handled automatically:
+
+```typescript
+const response = await fetch("/api/chunked")
+
+// Chunks are transparently decoded
+for await (const chunk of response.body) {
+  const text = new TextDecoder().decode(chunk)
+  process.stdout.write(text)
+}
+```
+
+## Abort signals
+
+Cancel requests with AbortController:
+
+```typescript
+const controller = new AbortController()
+
+const fetchPromise = fetch("/api/long-request", {
+  signal: controller.signal
+})
+
+// Cancel after 5 seconds
+setTimeout(() => controller.abort(), 5000)
+
+try {
+  const response = await fetchPromise
+} catch (err) {
+  if (err.name === "AbortError") {
+    console.log("Request cancelled")
+  }
+}
+```
+
+## Connection pooling
+
+Connections are automatically pooled and reused:
+
+```typescript
+const fetch = createAtlsFetch({ target: "enclave.example.com", policy })
+
+// First request: full aTLS handshake + attestation
+const r1 = await fetch("/api/data")
+
+// Subsequent requests: reuse connection
+const r2 = await fetch("/api/data")
+const r3 = await fetch("/api/data")
+
+// Attestation only happens once per connection
+```
+
+Connection pool behavior:
+- **Idle timeout**: 5 minutes
+- **Keep-alive**: Enabled by default
+- **Overflow connections**: Created when pool is busy, closed after use
+
+## Default headers
+
+Set default headers for all requests:
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy,
+  headers: {
+    "Authorization": `Bearer ${token}`,
+    "X-API-Version": "2024-01"
+  }
+})
+
+// Default headers are included automatically
+const response = await fetch("/api/data")
+
+// Override per-request
+const override = await fetch("/api/data", {
+  headers: {
+    "Authorization": `Bearer ${differentToken}`
+  }
+})
+```
+
+## URL resolution
+
+Multiple URL formats are supported:
+
+```typescript
+const fetch = createAtlsFetch({
+  target: "enclave.example.com",
+  policy
+})
+
+// Relative path
+await fetch("/api/data")
+
+// Absolute URL (same host) - uses aTLS
+await fetch("https://enclave.example.com/api/data")
+
+// Different host - falls back to global fetch
+await fetch("https://other-domain.com/api/data")
+
+// URL object
+await fetch(new URL("/api/data", "https://enclave.example.com"))
+```
+
+## HTTPS Agent (Node.js)
+
+For libraries that don't accept custom fetch functions, use the Agent API:
+
+```typescript
+import { createAtlsAgent } from "@concrete-security/atlas-node"
+import https from "https"
+import axios from "axios"
+
+const agent = createAtlsAgent({
+  target: "enclave.example.com",
+  policy,
+  onAttestation: (att) => console.log("Verified:", att.teeType)
+})
+
+// Use with https.request
+https.get("https://enclave.example.com/api", { agent }, (res) => {
+  // res.socket.atlsAttestation contains attestation data
+  console.log(res.socket.atlsAttestation)
+})
+
+// Use with axios
+const client = axios.create({ httpsAgent: agent })
+const response = await client.get("/api/data")
+```
+
+## Graceful shutdown
+
+Close all connections before process exit:
+
+```typescript
+import { closeAllSockets } from "@concrete-security/atlas-node/binding"
+
+process.on("SIGTERM", async () => {
+  console.log("Closing aTLS connections...")
+  await closeAllSockets()
+  process.exit(0)
+})
+```
+
+Recommended for:
+- Server processes with graceful shutdown handlers
+- Test suites that need clean teardown
+- CLI tools that need clean exit
+
+## Error handling
+
+Handle attestation and network errors:
+
+```typescript
+try {
+  const response = await fetch("/api/data")
+  
+  if (!response.attestation.trusted) {
+    throw new Error("TEE attestation failed")
+  }
+  
+  const data = await response.json()
+} catch (err) {
+  if (err.message.includes("attestation")) {
+    console.error("TEE verification failed:", err.message)
+  } else if (err.message.includes("ECONNREFUSED")) {
+    console.error("Connection refused - is the server running?")
+  } else {
+    console.error("Request failed:", err.message)
+  }
+}
+```
+
+## Next steps
+
+- [Custom Policies](/examples/custom-policies) - Configure verification rules
+- [AI SDK Integration](/examples/ai-sdk-integration) - Use with AI SDK providers
+- [Policy Configuration](/policy/overview) - Full policy reference

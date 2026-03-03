@@ -1,0 +1,235 @@
+---
+title: AttestedStream
+description: Low-level attested TLS stream for raw byte operations without HTTP handling
+---
+
+## Overview
+
+The `AttestedStream` class provides direct access to the raw attested TLS stream without any HTTP protocol handling. This is the lowest-level API, useful for custom protocols or debugging.
+
+For HTTP requests, use [`createAtlsFetch`](/api/wasm/create-atls-fetch) or [`AtlsHttp`](/api/wasm/atls-http) instead.
+
+## Class methods
+
+### connect
+
+Connect to a TEE server via WebSocket proxy and perform the aTLS protocol.
+
+```typescript
+static async connect(
+  wsUrl: string,
+  serverName: string,
+  policy: Policy
+): Promise<AttestedStream>
+```
+
+<ParamField path="wsUrl" type="string" required>
+  WebSocket proxy URL with optional target query parameter.
+
+  Examples:
+  - `"ws://127.0.0.1:9000?target=vllm.example.com:443"`
+  - `"ws://proxy.example.com:9000"`
+</ParamField>
+
+<ParamField path="serverName" type="string" required>
+  TLS server name for SNI and certificate validation.
+
+  Example: `"vllm.example.com"`
+</ParamField>
+
+<ParamField path="policy" type="Policy" required>
+  Attestation verification policy object.
+
+  See [Policy configuration](/core-concepts/policy) for details.
+</ParamField>
+
+<ResponseField name="return" type="AttestedStream">
+  An `AttestedStream` instance with:
+  - `readable`: Native ReadableStream for receiving data
+  - `send(data)`: Method to send data
+  - `attestation()`: Attestation verification result
+</ResponseField>
+
+### readable
+
+Get the native ReadableStream for receiving data from the TEE.
+
+```typescript
+get readable(): ReadableStream<Uint8Array>
+```
+
+<ResponseField name="return" type="ReadableStream<Uint8Array>">
+  A native Web ReadableStream that yields raw bytes from the attested TLS connection.
+
+  This stream can be passed directly to `new Response(readable)` or used with a reader.
+</ResponseField>
+
+### attestation
+
+Get the attestation verification result from the connection handshake.
+
+```typescript
+attestation(): AttestationSummary
+```
+
+<ResponseField name="return" type="AttestationSummary">
+  Attestation summary object containing:
+
+  <ResponseField name="trusted" type="boolean">
+    Whether the attestation was successfully verified
+  </ResponseField>
+
+  <ResponseField name="teeType" type="string">
+    The TEE type (e.g., "Tdx")
+  </ResponseField>
+
+  <ResponseField name="tcbStatus" type="string">
+    TCB status from Intel (e.g., "UpToDate", "SWHardeningNeeded")
+  </ResponseField>
+
+  <ResponseField name="advisoryIds" type="string[]">
+    List of security advisory IDs
+  </ResponseField>
+</ResponseField>
+
+### send
+
+Send raw bytes to the TEE over the attested TLS connection.
+
+```typescript
+async send(data: Uint8Array): Promise<void>
+```
+
+<ParamField path="data" type="Uint8Array" required>
+  Raw bytes to send over the attested TLS connection
+</ParamField>
+
+<ResponseField name="return" type="Promise<void>">
+  Resolves when the data has been written and flushed
+</ResponseField>
+
+### closeWrite
+
+Close the write side of the stream.
+
+```typescript
+async closeWrite(): Promise<void>
+```
+
+<ResponseField name="return" type="Promise<void>">
+  Resolves when the write side has been closed
+</ResponseField>
+
+## Stream design
+
+The `AttestedStream` provides:
+
+- **Zero-copy reads**: Response data streams directly through the native ReadableStream
+- **Simple writes**: Send data via the async `send()` method
+- **Bidirectional**: Read and write sides can operate independently
+
+## Examples
+
+### Raw HTTP request
+
+```javascript
+import init, { AttestedStream } from "@concrete-security/atlas-wasm";
+
+await init();
+
+const stream = await AttestedStream.connect(
+  "ws://127.0.0.1:9000?target=vllm.example.com:443",
+  "vllm.example.com",
+  { type: "dstack_tdx" }
+);
+
+console.log(stream.attestation()); // { trusted: true, teeType: "Tdx", ... }
+
+// Send raw HTTP request
+await stream.send(
+  new TextEncoder().encode("GET / HTTP/1.1\r\nHost: vllm.example.com\r\n\r\n")
+);
+
+// Read raw response
+const reader = stream.readable.getReader();
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  console.log(new TextDecoder().decode(value));
+}
+```
+
+### Custom protocol
+
+```javascript
+const stream = await AttestedStream.connect(
+  "ws://127.0.0.1:9000?target=custom.example.com:8080",
+  "custom.example.com",
+  { type: "dstack_tdx" }
+);
+
+// Verify attestation
+const att = stream.attestation();
+if (!att.trusted) {
+  throw new Error("Attestation failed");
+}
+
+// Send custom protocol message
+const message = new Uint8Array([0x01, 0x02, 0x03, 0x04]);
+await stream.send(message);
+
+// Read response
+const reader = stream.readable.getReader();
+const { value } = await reader.read();
+console.log("Received:", value);
+```
+
+### Streaming with backpressure
+
+```javascript
+const stream = await AttestedStream.connect(
+  "ws://127.0.0.1:9000?target=api.example.com:443",
+  "api.example.com",
+  { type: "dstack_tdx" }
+);
+
+// Send request
+await stream.send(
+  new TextEncoder().encode("GET /stream HTTP/1.1\r\nHost: api.example.com\r\n\r\n")
+);
+
+// Create Response from readable stream (Web API)
+const response = new Response(stream.readable);
+const text = await response.text();
+console.log(text);
+```
+
+### Closing the write side
+
+```javascript
+const stream = await AttestedStream.connect(
+  "ws://127.0.0.1:9000?target=api.example.com:443",
+  "api.example.com",
+  { type: "dstack_tdx" }
+);
+
+// Send data
+await stream.send(new TextEncoder().encode("Hello"));
+
+// Signal no more writes (half-close)
+await stream.closeWrite();
+
+// Can still read response
+const reader = stream.readable.getReader();
+const { value } = await reader.read();
+console.log(new TextDecoder().decode(value));
+```
+
+## Use cases
+
+- **Custom protocols**: Implement non-HTTP protocols over attested TLS
+- **Debugging**: Inspect raw TLS traffic for debugging
+- **Low-level control**: Full control over when and how data is sent/received
+- **Protocol development**: Build higher-level protocol implementations
+
+For standard HTTP requests, prefer [`createAtlsFetch`](/api/wasm/create-atls-fetch) or [`AtlsHttp`](/api/wasm/atls-http).
