@@ -1,0 +1,140 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Atlas",
+  "projectDescription": "Multi-platform attested TLS (aTLS) library for verifying Trusted Execution Environment connections",
+  "theme": "aspen",
+  "primaryColor": "#2563eb",
+  "lightColor": "#3b82f6",
+  "darkColor": "#1e40af",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/atls-protocol",
+              "concepts/tee-attestation",
+              "concepts/session-binding",
+              "concepts/bootchain-verification"
+            ]
+          },
+          {
+            "group": "Policy Configuration",
+            "pages": [
+              "policy/overview",
+              "policy/dstack-tdx",
+              "policy/tcb-status",
+              "policy/computing-measurements"
+            ]
+          },
+          {
+            "group": "Platform Guides",
+            "pages": [
+              "platforms/nodejs",
+              "platforms/browser-wasm",
+              "platforms/rust"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/proxy-setup",
+              "deployment/production-checklist",
+              "deployment/security-considerations"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/ai-sdk-integration",
+              "examples/fetch-api",
+              "examples/custom-policies"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Rust API",
+            "pages": [
+              "api/rust/atls-connect",
+              "api/rust/verifier-trait",
+              "api/rust/policy-types",
+              "api/rust/error-handling"
+            ]
+          },
+          {
+            "group": "Node.js API",
+            "pages": [
+              "api/nodejs/create-atls-fetch",
+              "api/nodejs/create-atls-agent",
+              "api/nodejs/attestation-object",
+              "api/nodejs/typescript-types"
+            ]
+          },
+          {
+            "group": "Browser/WASM API",
+            "pages": [
+              "api/wasm/create-atls-fetch",
+              "api/wasm/atls-http",
+              "api/wasm/attested-stream"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Architecture",
+        "groups": [
+          {
+            "group": "Design",
+            "pages": [
+              "architecture/overview",
+              "architecture/verification-flow",
+              "architecture/extending-atls"
+            ]
+          },
+          {
+            "group": "Protocol Specification",
+            "pages": [
+              "protocol/tls-handshake",
+              "protocol/quote-retrieval",
+              "protocol/verification-steps"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-platform support (Node.js, Browser/WASM, Rust)",
+    "Intel TDX attestation verification via Intel DCAP",
+    "Configurable policy engine for TCB levels and measurements",
+    "Session binding via EKM (RFC 9266)",
+    "Bootchain and application configuration verification",
+    "WebSocket-to-TCP proxy for browser deployments"
+  ],
+  "publicApiSurface": [
+    "atls_connect() - High-level Rust API for TLS connection with attestation",
+    "AtlsVerifier trait - Low-level trait for custom verifiers",
+    "Policy enum - Configurable verification policies",
+    "createAtlsFetch() - Node.js fetch-compatible API",
+    "createAtlsAgent() - Node.js https.Agent for existing clients",
+    "createAtlsFetch() - Browser/WASM fetch API",
+    "AtlsHttp - WASM HTTP client with streaming",
+    "AttestedStream - WASM low-level TLS stream",
+    "DstackTDXVerifier - Intel TDX verifier implementation",
+    "ExpectedBootchain - Bootchain measurement configuration"
+  ]
+}
